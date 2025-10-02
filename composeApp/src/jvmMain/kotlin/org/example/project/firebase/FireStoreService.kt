@@ -399,8 +399,10 @@ class FirestoreService {
     suspend fun updateCustomer(userId: String, customerId: String, customerFields: CustomerFields, updateMask: List<String>): Result<Unit> {
         return try {
             val accessToken = getAccessToken()
-            val maskParam = updateMask.joinToString(",") // No "fields." prefix
-            val url = "$baseUrl/users/$userId/customer/$customerId?updateMask.fieldPaths=$maskParam"
+            val maskParams = updateMask.joinToString("&") { field ->
+                "updateMask.fieldPaths=$field"
+            }
+            val url = "$baseUrl/users/$userId/customer/$customerId?$maskParams"
 
 
             val response = httpClient.patch(url) {
