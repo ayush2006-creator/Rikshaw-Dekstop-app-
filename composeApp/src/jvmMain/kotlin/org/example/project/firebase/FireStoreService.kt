@@ -9,6 +9,9 @@ import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 import java.time.Instant
 import java.security.KeyFactory
@@ -189,13 +192,14 @@ class FirestoreService {
     @Serializable
     data class Document(
         val name: String,
-        val fields: Map<String, FieldValue>
+        val fields: Map<String, JsonElement> // Changed from Map<String, Any>
     )
 
-    @Serializable
-    data class FieldValue(
-        val stringValue: String
-    )
+    // REMOVED the incorrect FieldValue data class
+    // @Serializable
+    // data class FieldValue(
+    //     val stringValue: String
+    // )
 
     @Serializable
     data class Precondition(
@@ -220,12 +224,15 @@ class FirestoreService {
             val uniqueUpiDocPath =
                 "projects/$projectId/databases/(default)/documents/users/$userId/uniqueUpiIds/$upiId"
 
+            // --- FIX: Updated fields to match DataModels.kt schema ---
             val userUpiWrite = Write(
                 update = Document(
                     name = userUpiDocPath,
                     fields = mapOf(
-                        "upiId" to FieldValue(stringValue = upiId),
-                        "accNo" to FieldValue(stringValue = customerAccNo)
+                        "upiId" to buildJsonObject { put("stringValue", upiId) },
+                        "customerId" to buildJsonObject { put("stringValue", customerAccNo) },
+                        "isActive" to buildJsonObject { put("booleanValue", true) },
+                        "createdAt" to buildJsonObject { put("timestampValue", Instant.now().toString()) }
                     )
                 ),
                 currentDocument = Precondition(exists = false)
@@ -235,11 +242,22 @@ class FirestoreService {
                 update = Document(
                     name = uniqueUpiDocPath,
                     fields = mapOf(
-                        "customerId" to FieldValue(stringValue = customerAccNo)
+                        "customerId" to buildJsonObject { put("stringValue", customerAccNo) }
                     )
                 ),
                 currentDocument = Precondition(exists = false)
             )
+
+            // --- REMOVED CONFLICTING DECLARATION ---
+            // val uniqueUpiWrite = Write(
+            //     update = Document(
+            //         name = uniqueUpiDocPath,
+            //         fields = mapOf(
+            //             "customerId" to FieldValue(stringValue = customerAccNo)
+            //         )
+            //     ),
+            //     currentDocument = Precondition(exists = false)
+            // )
 
             val requestBody = CommitRequest(writes = listOf(userUpiWrite, uniqueUpiWrite))
 
@@ -631,7 +649,7 @@ class FirestoreService {
     suspend fun getUpiIdsForCustomer(userId: String, customerAccNo: String): Result<List<FirestoreUpiId>> {
         return try {
             val accessToken = getAccessToken()
-            val url = "$baseUrl/users/$userId/upiIds:runQuery"
+           val url = "$baseUrl/users/$userId:runQuery"
             // We need to construct a JSON body for the query
             // Updated to query 'customerId' and 'isActive' based on new DataModels.kt
             val queryBody = """
@@ -689,6 +707,33 @@ class FirestoreService {
         }
     }
 
+    // --- NEW METHOD: Delete a transaction ---
+    suspend fun deleteTransaction(userId: String, customerId: String, transactionId: String): Result<Unit> {
+        return try {
+            val accessToken = getAccessToken()
+            // Construct the full path to the specific transaction document
+            val url = "$baseUrl/users/$userId/customer/$customerId/transactions/$transactionId"
+
+            val response = httpClient.delete(url) {
+                header("Authorization", "Bearer $accessToken")
+            }
+
+            if (response.status.isSuccess()) {
+                println("Transaction deleted successfully: $transactionId")
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Failed to delete transaction: ${response.status} - ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // Add this method to your FirestoreService class
+
+
+
+    // Enhanced method with more transaction details and fine calculation
     // --- New method to update a transaction ---
     suspend fun updateTransaction(userId: String, customerId: String, transactionId: String, transactionFields: TransactionFields, updateMask: List<String>): Result<Unit> {
         return try {
@@ -727,4 +772,5 @@ class FirestoreService {
         }
     }
 }
+
 

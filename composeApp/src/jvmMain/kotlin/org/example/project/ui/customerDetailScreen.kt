@@ -4,7 +4,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -14,43 +16,34 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import org.example.project.firebase.FirestoreCustomer
-import org.example.project.firebase.FirestoreTransaction // Added import
-import org.example.project.firebase.DoubleValue // Added import
-import org.example.project.firebase.FirestoreUpiId // Added import
-import org.example.project.viewmodels.AuthViewModel
+import org.example.project.firebase.CustomerFields
+import org.example.project.firebase.StringValue
+import org.example.project.firebase.DoubleValue
 import org.example.project.viewmodels.CustomerViewModel
-import org.example.project.viewmodels.CustomerUiState // Added import
+import org.example.project.viewmodels.CustomerUiState
 import java.text.SimpleDateFormat
-import java.time.Instant
 import java.util.*
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CustomerDetailScreen(
     customerViewModel: CustomerViewModel,
-    authViewModel: AuthViewModel,
     customer: FirestoreCustomer,
     onBack: () -> Unit
 ) {
     val customerState = customerViewModel.uiState
     var showEditDialog by remember { mutableStateOf(false) }
 
-    // Local state to hold current customer data
-    var currentCustomer by remember { mutableStateOf(customer) }
-
-    LaunchedEffect(customer.name) {
-        customerViewModel.loadTransactions()
+    // This local state is crucial for reflecting optimistic updates from the ViewModel
+    val currentCustomer by remember(customerState.selectedCustomer) {
+        mutableStateOf(customerState.selectedCustomer ?: customer)
     }
 
-    // Update current customer when the viewmodel state for selectedCustomer changes
-    // This ensures our local `currentCustomer` updates after a successful API edit
-    LaunchedEffect(customerState.selectedCustomer) {
-        customerState.selectedCustomer?.let {
-            if (it.name == currentCustomer.name) { // Only update if it's the same customer
-                currentCustomer = it
-            }
-        }
-    }
+    // Removed LaunchedEffect, as data loading is now handled by
+    // customerViewModel.selectCustomer() before navigating here.
 
     Scaffold(
         topBar = {
@@ -83,8 +76,7 @@ fun CustomerDetailScreen(
                             .padding(16.dp)
                     ) {
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = "Customer Details",
@@ -98,6 +90,7 @@ fun CustomerDetailScreen(
                                 Icon(Icons.Default.Edit, contentDescription = "Edit Customer")
                             }
                         }
+
                         Spacer(modifier = Modifier.height(16.dp))
 
                         CustomerDetailRow("Account No", currentCustomer.fields.Accno.stringValue)
@@ -123,66 +116,72 @@ fun CustomerDetailScreen(
                         )
 
                         val remainingAmount =
-                            customerViewModel.getRemainingAmount(currentCustomer)
+                            currentCustomer.fields.Amount.doubleValue - currentCustomer.fields.amountPaid.doubleValue
                         CustomerDetailRow(
                             "Remaining Amount",
                             "₹%.2f".format(remainingAmount),
                             isHighlight = remainingAmount > 0
                         )
-
-                        // --- UPI IDs Section ---
-                        Divider(modifier = Modifier.padding(vertical = 12.dp))
-                        Text(
-                            text = "UPI IDs",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        customerState.customerUpiIds?.let { upiIds ->
-                            if (upiIds.isEmpty()) {
-                                Text(
-                                    "No UPI IDs added.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            } else {
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    upiIds.forEach { upiIdDoc ->
-                                        Text(
-                                            upiIdDoc.fields.upiId.stringValue,
-                                            style = MaterialTheme.typography.bodyLarge
-                                        )
-                                    }
-                                }
-                            }
-                        } ?: run {
-                            // Show shimmer or placeholder while loading
-                            Text(
-                                "Loading UPI IDs...",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = { customerViewModel.openAddUpiIdDialog() },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Add New UPI ID")
-                        }
-                        // --- End of UPI IDs Section ---
                     }
                 }
             }
+
+            // --- UPI IDs Section ---
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Active UPI IDs",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(
+                                onClick = { customerViewModel.openAddUpiIdDialog() }
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "Add UPI ID")
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        val upiIds = customerState.upiIds
+                        if (upiIds.isNullOrEmpty()) {
+                            Text(
+                                "No active UPI IDs found.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            upiIds.forEach { upiId ->
+                                Text(
+                                    text = upiId.fields.upiId.stringValue,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
 
             // Transactions Section
             item {
                 Text(
                     text = "Transaction History",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(top = 16.dp)
                 )
             }
 
@@ -216,10 +215,17 @@ fun CustomerDetailScreen(
                                 Text("Fine: ₹${transaction.fields.Fine.doubleValue}")
                             },
                             trailingContent = {
-                                IconButton(onClick = {
-                                    customerViewModel.openEditTransactionDialog(transaction)
-                                }) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit Fine")
+                                Row {
+                                    IconButton(onClick = {
+                                        customerViewModel.openEditTransactionDialog(transaction)
+                                    }) {
+                                        Icon(Icons.Default.Edit, contentDescription = "Edit Fine")
+                                    }
+                                    IconButton(onClick = {
+                                        customerViewModel.openDeleteTransactionDialog(transaction)
+                                    }) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete Transaction", tint = MaterialTheme.colorScheme.error)
+                                    }
                                 }
                             }
                         )
@@ -249,7 +255,7 @@ fun CustomerDetailScreen(
         }
     }
 
-    // --- Dialogs ---
+    // --- DIALOGS ---
 
     // Edit Customer Dialog
     if (showEditDialog) {
@@ -258,8 +264,6 @@ fun CustomerDetailScreen(
             onDismiss = { showEditDialog = false },
             onSave = { updatedCustomerFields ->
                 val customerId = currentCustomer.name.substringAfterLast('/')
-
-                // Call the API to update
                 customerViewModel.updateCustomer(
                     customerId = customerId,
                     updatedFields = updatedCustomerFields,
@@ -275,7 +279,7 @@ fun CustomerDetailScreen(
         AddUpiIdDialog(
             uiState = customerState,
             onDismiss = { customerViewModel.closeAddUpiIdDialog() },
-            onSave = { customerViewModel.addUpiIdForCustomer() },
+            onConfirm = { customerViewModel.confirmAddUpiId() },
             onUpiIdChange = { customerViewModel.onNewUpiIdChange(it) }
         )
     }
@@ -285,8 +289,17 @@ fun CustomerDetailScreen(
         EditTransactionDialog(
             uiState = customerState,
             onDismiss = { customerViewModel.closeEditTransactionDialog() },
-            onSave = { customerViewModel.updateTransactionFine() },
+            onConfirm = { customerViewModel.confirmEditTransaction() },
             onFineChange = { customerViewModel.onEditTransactionFineChange(it) }
+        )
+    }
+
+    // Delete Transaction Dialog
+    if (customerState.isDeleteTransactionDialogOpen) {
+        DeleteTransactionDialog(
+            uiState = customerState,
+            onDismiss = { customerViewModel.closeDeleteTransactionDialog() },
+            onConfirm = { customerViewModel.confirmDeleteTransaction() }
         )
     }
 }
@@ -296,7 +309,7 @@ fun CustomerDetailScreen(
 fun EditCustomerDialog(
     customer: FirestoreCustomer,
     onDismiss: () -> Unit,
-    onSave: (org.example.project.firebase.CustomerFields) -> Unit
+    onSave: (CustomerFields) -> Unit
 ) {
     var name by remember { mutableStateOf(customer.fields.Name.stringValue) }
     var phoneNo by remember { mutableStateOf(customer.fields.PhoneNo.stringValue) }
@@ -393,16 +406,12 @@ fun EditCustomerDialog(
                         return@Button
                     }
 
-                    val updatedFields = org.example.project.firebase.CustomerFields(
-                        Accno = customer.fields.Accno,
-                        Name = org.example.project.firebase.StringValue(name),
-                        PhoneNo = org.example.project.firebase.StringValue(phoneNo),
-                        VehicleNo = org.example.project.firebase.StringValue(vehicleNo),
-                        OpeningDate = customer.fields.OpeningDate,
-                        ClosingDate = customer.fields.ClosingDate,
-                        installmentAmount = org.example.project.firebase.DoubleValue(installmentValue),
-                        Amount = org.example.project.firebase.DoubleValue(amountValue),
-                        amountPaid = customer.fields.amountPaid
+                    val updatedFields = customer.fields.copy(
+                        Name = StringValue(name),
+                        PhoneNo = StringValue(phoneNo),
+                        VehicleNo = StringValue(vehicleNo),
+                        installmentAmount = DoubleValue(installmentValue),
+                        Amount = DoubleValue(amountValue)
                     )
                     onSave(updatedFields)
                 }
@@ -423,7 +432,7 @@ fun EditCustomerDialog(
 fun AddUpiIdDialog(
     uiState: CustomerUiState,
     onDismiss: () -> Unit,
-    onSave: () -> Unit,
+    onConfirm: () -> Unit,
     onUpiIdChange: (String) -> Unit
 ) {
     AlertDialog(
@@ -432,15 +441,15 @@ fun AddUpiIdDialog(
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 if (uiState.isAddingUpiId) {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                    CircularProgressIndicator()
                 } else {
                     OutlinedTextField(
                         value = uiState.newUpiId,
                         onValueChange = onUpiIdChange,
-                        label = { Text("UPI ID (e.g., user@okhdfcbank)") },
+                        label = { Text("UPI ID") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
                         isError = uiState.addUpiIdError != null
@@ -449,7 +458,8 @@ fun AddUpiIdDialog(
                         Text(
                             text = uiState.addUpiIdError,
                             color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
                 }
@@ -457,17 +467,14 @@ fun AddUpiIdDialog(
         },
         confirmButton = {
             Button(
-                onClick = onSave,
+                onClick = onConfirm,
                 enabled = !uiState.isAddingUpiId
             ) {
-                Text("Save")
+                Text("Add")
             }
         },
         dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                enabled = !uiState.isAddingUpiId
-            ) {
+            TextButton(onClick = onDismiss, enabled = !uiState.isAddingUpiId) {
                 Text("Cancel")
             }
         }
@@ -479,23 +486,26 @@ fun AddUpiIdDialog(
 fun EditTransactionDialog(
     uiState: CustomerUiState,
     onDismiss: () -> Unit,
-    onSave: () -> Unit,
+    onConfirm: () -> Unit,
     onFineChange: (String) -> Unit
 ) {
+    val transaction = uiState.transactionToEdit
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Edit Transaction Fine") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (uiState.isUpdatingTransaction) {
-                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
-                } else {
+                if (uiState.isEditingTransaction) {
+                    CircularProgressIndicator()
+                } else if (transaction != null) {
                     Text(
-                        "Only the fine amount can be edited. To change the payment amount, please delete and recreate the transaction.",
-                        style = MaterialTheme.typography.bodySmall
+                        "Editing transaction from ${formatTimestamp(transaction.fields.date.timestampValue)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(bottom = 16.dp)
                     )
                     OutlinedTextField(
                         value = uiState.editTransactionFine,
@@ -510,7 +520,8 @@ fun EditTransactionDialog(
                         Text(
                             text = uiState.editTransactionError,
                             color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodySmall
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
                 }
@@ -518,17 +529,62 @@ fun EditTransactionDialog(
         },
         confirmButton = {
             Button(
-                onClick = onSave,
-                enabled = !uiState.isUpdatingTransaction
+                onClick = onConfirm,
+                enabled = !uiState.isEditingTransaction
             ) {
                 Text("Save")
             }
         },
         dismissButton = {
-            TextButton(
-                onClick = onDismiss,
-                enabled = !uiState.isUpdatingTransaction
+            TextButton(onClick = onDismiss, enabled = !uiState.isEditingTransaction) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun DeleteTransactionDialog(
+    uiState: CustomerUiState,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete Transaction?") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                if (uiState.isDeletingTransaction) {
+                    CircularProgressIndicator()
+                } else {
+                    val amount = uiState.transactionToDelete?.fields?.amount?.doubleValue ?: 0.0
+                    val date = formatTimestamp(uiState.transactionToDelete?.fields?.date?.timestampValue ?: "")
+                    Text("Are you sure you want to delete the transaction of ₹$amount from $date?\n\nThis will also subtract ₹$amount from the customer's 'Amount Paid'. This action cannot be undone.")
+                }
+                if (uiState.errorMessage != null) {
+                    Text(
+                        text = uiState.errorMessage,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = !uiState.isDeletingTransaction,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+            ) {
+                Text("Delete")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !uiState.isDeletingTransaction) {
                 Text("Cancel")
             }
         }
@@ -555,7 +611,7 @@ fun CustomerDetailRow(
             modifier = Modifier.weight(1f)
         )
         Text(
-            text = value.ifBlank { "N/A" }, // Show N/A if value is blank
+            text = value,
             style = MaterialTheme.typography.bodyMedium,
             color = if (isHighlight && value.contains("₹") && !value.contains("₹0.00")) {
                 MaterialTheme.colorScheme.error
@@ -572,10 +628,11 @@ fun formatTimestamp(timestamp: String): String {
     if (timestamp.isBlank()) return "N/A"
     return try {
         val instant = Instant.parse(timestamp)
-        val date = Date.from(instant)
-        val sdf = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
-        sdf.format(date)
+        val formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy")
+            .withZone(ZoneId.systemDefault())
+        formatter.format(instant)
     } catch (e: Exception) {
-        timestamp // Return original string if parsing fails
+        timestamp // Fallback to raw string
     }
 }
+

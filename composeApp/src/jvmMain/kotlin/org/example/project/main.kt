@@ -6,7 +6,7 @@ import androidx.compose.ui.window.application
 import org.example.project.firebase.AuthFirebaseService
 import org.example.project.firebase.FirestoreService
 
-import org.example.project.ui.App
+import org.example.project.App
 import org.example.project.viewmodels.AuthViewModel
 
 

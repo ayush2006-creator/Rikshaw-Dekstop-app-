@@ -6,7 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
-import org.example.project.firebase.* // Assuming FirestoreTransaction is in here
+import org.example.project.firebase.*
 
 import java.time.Instant
 import java.time.LocalDate
@@ -17,8 +17,11 @@ data class CustomerUiState(
     val customers: CustomerListResponse? = null,
     val selectedCustomer: FirestoreCustomer? = null,
     val transactions: TransactionListResponse? = null,
+    val upiIds: List<FirestoreUpiId>? = null, // For UPI IDs
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
+
+    // Add Customer Dialog
     val isAddCustomerDialogOpen: Boolean = false,
     val newCustomerAccNo: String = "",
     val newCustomerName: String = "",
@@ -31,19 +34,23 @@ data class CustomerUiState(
     val isAddingCustomer: Boolean = false,
     val addCustomerError: String? = null,
 
-    // State for UPI ID
-    val customerUpiIds: List<FirestoreUpiId>? = null,
+    // Add UPI ID Dialog
     val isAddUpiIdDialogOpen: Boolean = false,
     val newUpiId: String = "",
     val addUpiIdError: String? = null,
     val isAddingUpiId: Boolean = false,
 
-    // State for Editing Transaction
-    val selectedTransaction: FirestoreTransaction? = null,
+    // Edit Transaction Dialog
     val isEditTransactionDialogOpen: Boolean = false,
+    val transactionToEdit: FirestoreTransaction? = null,
     val editTransactionFine: String = "",
     val editTransactionError: String? = null,
-    val isUpdatingTransaction: Boolean = false
+    val isEditingTransaction: Boolean = false,
+
+    // Delete Transaction Dialog
+    val isDeleteTransactionDialogOpen: Boolean = false,
+    val transactionToDelete: FirestoreTransaction? = null,
+    val isDeletingTransaction: Boolean = false
 )
 
 
@@ -144,15 +151,16 @@ class CustomerViewModel(
         uiState = uiState.copy(
             selectedCustomer = customer,
             transactions = null,
-            errorMessage = null,
-            customerUpiIds = null // Clear old UPI IDs
+            upiIds = null,
+            errorMessage = null
         )
-        // Load UPI IDs for the selected customer
-        loadUpiIds(customer.fields.Accno.stringValue)
+        // Load both transactions and UPI IDs
+        loadTransactions()
+        loadUpiIds()
     }
 
     fun clearSelectedCustomer() {
-        uiState = uiState.copy(selectedCustomer = null, transactions = null, customerUpiIds = null)
+        uiState = uiState.copy(selectedCustomer = null, transactions = null, upiIds = null)
 
     }
 
@@ -266,6 +274,27 @@ class CustomerViewModel(
         }
     }
 
+    fun loadUpiIds() {
+        viewModelScope.launch {
+            val customerAccNo = uiState.selectedCustomer?.fields?.Accno?.stringValue ?: run {
+                uiState = uiState.copy(errorMessage = "No customer selected.")
+                return@launch
+            }
+
+            uiState = uiState.copy(isLoading = true)
+            val result = firestoreService.getUpiIdsForCustomer(currentUserId, customerAccNo)
+            uiState = result.fold(
+                onSuccess = {
+                    uiState.copy(isLoading = false, upiIds = it)
+                },
+                onFailure = {
+                    val errorMessage = "Failed to load UPI IDs: ${it.message}"
+                    uiState.copy(isLoading = false, errorMessage = errorMessage)
+                }
+            )
+        }
+    }
+
     // Additional methods for full CRUD operations
     fun updateCustomer(customerId: String, updatedFields: CustomerFields, fieldsToUpdate: List<String>) {
         viewModelScope.launch {
@@ -276,9 +305,11 @@ class CustomerViewModel(
             result.fold(
                 onSuccess = {
                     println("Customer updated successfully!")
-                    // Optimistically update selectedCustomer as well
-                    val updatedSelectedCustomer = uiState.selectedCustomer?.copy(fields = updatedFields)
-                    uiState = uiState.copy(isLoading = false, selectedCustomer = updatedSelectedCustomer)
+                    // Update the selected customer in the UI state
+                    uiState = uiState.copy(
+                        isLoading = false,
+                        selectedCustomer = uiState.selectedCustomer?.copy(fields = updatedFields)
+                    )
                     loadCustomers() // Refresh the main list
                 },
                 onFailure = { error ->
@@ -309,6 +340,166 @@ class CustomerViewModel(
             )
         }
     }
+
+    // --- Add UPI ID Dialog Functions ---
+    fun openAddUpiIdDialog() {
+        uiState = uiState.copy(isAddUpiIdDialogOpen = true, newUpiId = "", addUpiIdError = null)
+    }
+
+    fun closeAddUpiIdDialog() {
+        uiState = uiState.copy(isAddUpiIdDialogOpen = false, isAddingUpiId = false)
+    }
+
+    fun onNewUpiIdChange(upiId: String) {
+        uiState = uiState.copy(newUpiId = upiId, addUpiIdError = null)
+    }
+
+    fun confirmAddUpiId() {
+        val upiId = uiState.newUpiId
+        val customerAccNo = uiState.selectedCustomer?.fields?.Accno?.stringValue
+
+        if (upiId.isBlank()) {
+            uiState = uiState.copy(addUpiIdError = "UPI ID cannot be empty.")
+            return
+        }
+        if (customerAccNo == null) {
+            uiState = uiState.copy(addUpiIdError = "No customer selected.")
+            return
+        }
+
+        viewModelScope.launch {
+            uiState = uiState.copy(isAddingUpiId = true, addUpiIdError = null)
+            val result = firestoreService.addUpiId(currentUserId, upiId, customerAccNo)
+            result.fold(
+                onSuccess = {
+                    closeAddUpiIdDialog()
+                    loadUpiIds() // Refresh the list
+                },
+                onFailure = {
+                    uiState = uiState.copy(isAddingUpiId = false, addUpiIdError = it.message)
+                }
+            )
+        }
+    }
+
+    // --- Edit Transaction Dialog Functions ---
+    fun openEditTransactionDialog(transaction: FirestoreTransaction) {
+        uiState = uiState.copy(
+            isEditTransactionDialogOpen = true,
+            transactionToEdit = transaction,
+            editTransactionFine = transaction.fields.Fine.doubleValue.toString(),
+            editTransactionError = null
+        )
+    }
+
+    fun closeEditTransactionDialog() {
+        uiState = uiState.copy(
+            isEditTransactionDialogOpen = false,
+            transactionToEdit = null,
+            isEditingTransaction = false
+        )
+    }
+
+    fun onEditTransactionFineChange(fine: String) {
+        uiState = uiState.copy(editTransactionFine = fine, editTransactionError = null)
+    }
+
+    fun confirmEditTransaction() {
+        val transaction = uiState.transactionToEdit ?: return
+        val customerId = uiState.selectedCustomer?.name?.substringAfterLast('/') ?: return
+        val transactionId = transaction.name.substringAfterLast('/')
+        val newFine = uiState.editTransactionFine.toDoubleOrNull()
+
+        if (newFine == null) {
+            uiState = uiState.copy(editTransactionError = "Please enter a valid number for the fine.")
+            return
+        }
+
+        val updatedFields = transaction.fields.copy(Fine = DoubleValue(newFine))
+        viewModelScope.launch {
+            uiState = uiState.copy(isEditingTransaction = true, editTransactionError = null)
+            val result = firestoreService.updateTransaction(
+                currentUserId,
+                customerId,
+                transactionId,
+                updatedFields,
+                listOf("Fine")
+            )
+            result.fold(
+                onSuccess = {
+                    closeEditTransactionDialog()
+                    loadTransactions() // Refresh the list
+                },
+                onFailure = {
+                    uiState = uiState.copy(isEditingTransaction = false, editTransactionError = it.message)
+                }
+            )
+        }
+    }
+
+    // --- Delete Transaction Dialog Functions ---
+    fun openDeleteTransactionDialog(transaction: FirestoreTransaction) {
+        uiState = uiState.copy(isDeleteTransactionDialogOpen = true, transactionToDelete = transaction)
+    }
+
+    fun closeDeleteTransactionDialog() {
+        uiState = uiState.copy(isDeleteTransactionDialogOpen = false, transactionToDelete = null, isDeletingTransaction = false)
+    }
+
+    fun confirmDeleteTransaction() {
+        val transaction = uiState.transactionToDelete ?: return
+        val customer = uiState.selectedCustomer ?: return
+
+        val customerId = customer.name.substringAfterLast('/')
+        val transactionId = transaction.name.substringAfterLast('/')
+        val amountToSubtract = transaction.fields.amount.doubleValue
+        val currentAmountPaid = customer.fields.amountPaid.doubleValue
+        val newAmountPaid = (currentAmountPaid - amountToSubtract).coerceAtLeast(0.0)
+
+        val updatedCustomerFields = customer.fields.copy(amountPaid = DoubleValue(newAmountPaid))
+
+        viewModelScope.launch {
+            uiState = uiState.copy(isDeletingTransaction = true, errorMessage = null)
+
+            // 1. Update the customer's amountPaid first
+            val updateResult = firestoreService.updateCustomer(
+                currentUserId,
+                customerId,
+                updatedCustomerFields,
+                listOf("amountPaid")
+            )
+
+            if (updateResult.isSuccess) {
+                // 2. If customer update succeeds, delete the transaction
+                val deleteResult = firestoreService.deleteTransaction(
+                    currentUserId,
+                    customerId,
+                    transactionId
+                )
+
+                if (deleteResult.isSuccess) {
+                    // 3. Both succeeded, refresh UI
+                    closeDeleteTransactionDialog() // This will also set isDeletingTransaction = false
+                    loadTransactions()
+                    // Optimistically update the customer in the UI
+                    uiState = uiState.copy(selectedCustomer = customer.copy(fields = updatedCustomerFields))
+                } else {
+                    // Transaction delete failed.
+                    uiState = uiState.copy(
+                        isDeletingTransaction = false,
+                        errorMessage = "Error: Failed to delete transaction. ${deleteResult.exceptionOrNull()?.message}"
+                    )
+                }
+            } else {
+                // Customer update failed. Don't delete transaction.
+                uiState = uiState.copy(
+                    isDeletingTransaction = false,
+                    errorMessage = "Failed to update customer. Transaction was not deleted. ${updateResult.exceptionOrNull()?.message}"
+                )
+            }
+        }
+    }
+
 
     fun addDetailedTransaction(
         accountNo: String,
@@ -442,117 +633,5 @@ class CustomerViewModel(
     }
 
 
-    // --- UPI ID Management ---
-
-    private fun loadUpiIds(customerAccNo: String) {
-        viewModelScope.launch {
-            val result = firestoreService.getUpiIdsForCustomer(currentUserId, customerAccNo)
-            result.fold(
-                onSuccess = {
-                    uiState = uiState.copy(customerUpiIds = it)
-                },
-                onFailure = {
-                    uiState = uiState.copy(errorMessage = "Failed to load UPI IDs: ${it.message}")
-                }
-            )
-        }
-    }
-
-    fun onNewUpiIdChange(upiId: String) {
-        uiState = uiState.copy(newUpiId = upiId, addUpiIdError = null)
-    }
-
-    fun openAddUpiIdDialog() {
-        uiState = uiState.copy(isAddUpiIdDialogOpen = true, newUpiId = "", addUpiIdError = null)
-    }
-
-    fun closeAddUpiIdDialog() {
-        uiState = uiState.copy(isAddUpiIdDialogOpen = false, isAddingUpiId = false)
-    }
-
-    fun addUpiIdForCustomer() {
-        val accNo = uiState.selectedCustomer?.fields?.Accno?.stringValue ?: return
-        val upiId = uiState.newUpiId
-
-        if (upiId.isBlank()) {
-            uiState = uiState.copy(addUpiIdError = "UPI ID cannot be empty")
-            return
-        }
-
-        viewModelScope.launch {
-            uiState = uiState.copy(isAddingUpiId = true, addUpiIdError = null)
-            val result = firestoreService.addUpiId(currentUserId, upiId, accNo)
-            result.fold(
-                onSuccess = {
-                    closeAddUpiIdDialog()
-                    loadUpiIds(accNo) // Refresh the list
-                },
-                onFailure = {
-                    uiState = uiState.copy(isAddingUpiId = false, addUpiIdError = it.message)
-                }
-            )
-        }
-    }
-
-    // --- Transaction Edit Management ---
-
-    fun onEditTransactionFineChange(fine: String) {
-        uiState = uiState.copy(editTransactionFine = fine, editTransactionError = null)
-    }
-
-    fun openEditTransactionDialog(transaction: FirestoreTransaction) {
-        uiState = uiState.copy(
-            isEditTransactionDialogOpen = true,
-            selectedTransaction = transaction,
-            editTransactionFine = transaction.fields.Fine.doubleValue.toString(),
-            editTransactionError = null
-        )
-    }
-
-    fun closeEditTransactionDialog() {
-        uiState = uiState.copy(
-            isEditTransactionDialogOpen = false,
-            selectedTransaction = null,
-            isUpdatingTransaction = false
-        )
-    }
-
-    fun updateTransactionFine() {
-        val transaction = uiState.selectedTransaction ?: return
-        val customerId = uiState.selectedCustomer?.name?.substringAfterLast('/') ?: return
-        val transactionId = transaction.name.substringAfterLast('/')
-        val newFine = uiState.editTransactionFine.toDoubleOrNull()
-
-        if (newFine == null || newFine < 0) {
-            uiState = uiState.copy(editTransactionError = "Please enter a valid fine amount")
-            return
-        }
-
-        viewModelScope.launch {
-            uiState = uiState.copy(isUpdatingTransaction = true, editTransactionError = null)
-
-            val updatedFields = transaction.fields.copy(Fine = DoubleValue(newFine))
-
-            val result = firestoreService.updateTransaction(
-                userId = currentUserId,
-                customerId = customerId,
-                transactionId = transactionId,
-                transactionFields = updatedFields,
-                updateMask = listOf("Fine")
-            )
-
-            result.fold(
-                onSuccess = {
-                    closeEditTransactionDialog()
-                    loadTransactions() // Refresh the list
-                },
-                onFailure = {
-                    uiState = uiState.copy(
-                        isUpdatingTransaction = false,
-                        editTransactionError = it.message
-                    )
-                }
-            )
-        }
-    }
 }
+

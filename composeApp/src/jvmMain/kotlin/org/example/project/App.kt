@@ -1,5 +1,5 @@
 // FILE: App.kt
-package org.example.project.ui
+package org.example.project
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,9 +44,9 @@ fun App(authViewModel: AuthViewModel, firestoreService: FirestoreService) {
         if (authState.authData != null && customerViewModel != null && customerState != null) {
             // The logic for the detail screen takes priority
             if (customerState.selectedCustomer != null) {
-                CustomerDetailScreen(
+                _root_ide_package_.org.example.project.ui.CustomerDetailScreen(
                     customerViewModel = customerViewModel,
-                    authViewModel = authViewModel,
+
                     customer = customerState.selectedCustomer,
                     onBack = {
                         customerViewModel.clearSelectedCustomer()
@@ -58,7 +58,7 @@ fun App(authViewModel: AuthViewModel, firestoreService: FirestoreService) {
                 // NEW: Navigation logic for switching between the main screens
                 when (currentScreen) {
                     is MainScreen.CustomerList -> {
-                        CustomerScreen(
+                        _root_ide_package_.org.example.project.ui.CustomerScreen(
                             customerViewModel = customerViewModel,
                             authViewModel = authViewModel,
                             onSignOut = authViewModel::signOut,
@@ -68,7 +68,7 @@ fun App(authViewModel: AuthViewModel, firestoreService: FirestoreService) {
                         )
                     }
                     is MainScreen.PendingInstallments -> {
-                        PendingInstallmentsScreen(
+                        _root_ide_package_.org.example.project.ui.PendingInstallmentsScreen(
                             viewModel = customerViewModel,
                             // Pass the lambda to navigate back to the list
                             onNavigateBack = { currentScreen = MainScreen.CustomerList }
@@ -86,8 +86,12 @@ fun App(authViewModel: AuthViewModel, firestoreService: FirestoreService) {
                     elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
                 ) {
                     when (authScreen) {
-                        is Screen.SignUp -> SignUpScreen(authViewModel) { authScreen = Screen.SignIn }
-                        is Screen.SignIn -> SignInScreen(authViewModel) { authScreen = Screen.SignUp }
+                        is Screen.SignUp -> _root_ide_package_.org.example.project.ui.SignUpScreen(
+                            authViewModel
+                        ) { authScreen = Screen.SignIn }
+                        is Screen.SignIn -> _root_ide_package_.org.example.project.ui.SignInScreen(
+                            authViewModel
+                        ) { authScreen = Screen.SignUp }
                     }
                 }
             }
