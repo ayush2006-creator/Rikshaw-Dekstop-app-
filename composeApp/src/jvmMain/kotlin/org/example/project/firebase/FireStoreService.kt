@@ -25,6 +25,13 @@ data class FirestoreDocumentResponse(
     val fields: CustomerFields // Or a more generic map if needed
 )
 
+// This wrapper is used when parsing the result of a :runQuery request
+@Serializable
+data class QueryResponseDocument(
+    val document: FirestoreUpiId,
+    val readTime: String
+)
+
 @Serializable
 data class ServiceAccountKey(
     val type: String,
@@ -46,6 +53,11 @@ data class AccessTokenResponse(
     val expires_in: Int,
     val token_type: String
 )
+
+// --- REMOVED CONFLICTING DATA CLASSES ---
+// The definitions for FirestoreUpiId and UpiIdFields
+// have been moved to DataModels.kt
+// ---
 
 class FirestoreService {
     private val projectId = "rikshaw-925ef"
@@ -615,6 +627,96 @@ class FirestoreService {
         }
     }
 
+    // --- New method to get UPI IDs ---
+    suspend fun getUpiIdsForCustomer(userId: String, customerAccNo: String): Result<List<FirestoreUpiId>> {
+        return try {
+            val accessToken = getAccessToken()
+            val url = "$baseUrl/users/$userId/upiIds:runQuery"
+            // We need to construct a JSON body for the query
+            // Updated to query 'customerId' and 'isActive' based on new DataModels.kt
+            val queryBody = """
+                {
+                  "structuredQuery": {
+                    "from": [{"collectionId": "upiIds"}],
+                    "where": {
+                      "compositeFilter": {
+                        "op": "AND",
+                        "filters": [
+                          {
+                            "fieldFilter": {
+                              "field": {"fieldPath": "customerId"},
+                              "op": "EQUAL",
+                              "value": {"stringValue": "$customerAccNo"}
+                            }
+                          },
+                          {
+                            "fieldFilter": {
+                              "field": {"fieldPath": "isActive"},
+                              "op": "EQUAL",
+                              "value": {"booleanValue": true}
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+            """.trimIndent()
+
+            val response = httpClient.post(url) {
+                header("Authorization", "Bearer $accessToken")
+                contentType(ContentType.Application.Json)
+                setBody(queryBody)
+            }
+
+            if (response.status.isSuccess()) {
+                val json = Json { ignoreUnknownKeys = true }
+                // runQuery returns a JSON array of documents, potentially empty
+                val responseBody = response.bodyAsText()
+                if (responseBody == "[]") {
+                    return Result.success(emptyList()) // No matching documents
+                }
+
+                // Each item in the array has a "document" field
+                val queryResponse = json.decodeFromString<List<QueryResponseDocument>>(responseBody)
+                val documents = queryResponse.map { it.document }
+                Result.success(documents)
+            } else {
+                Result.failure(Exception("Firestore error: ${response.status} - ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // --- New method to update a transaction ---
+    suspend fun updateTransaction(userId: String, customerId: String, transactionId: String, transactionFields: TransactionFields, updateMask: List<String>): Result<Unit> {
+        return try {
+            val accessToken = getAccessToken()
+            val maskParams = updateMask.joinToString("&") { field ->
+                "updateMask.fieldPaths=$field"
+            }
+            // Construct the full path to the specific transaction document
+            val url = "$baseUrl/users/$userId/customer/$customerId/transactions/$transactionId?$maskParams"
+
+
+            val response = httpClient.patch(url) {
+                header("Authorization", "Bearer $accessToken")
+                contentType(ContentType.Application.Json)
+                setBody(mapOf("fields" to transactionFields))
+            }
+
+            if (response.status.isSuccess()) {
+                println("Transaction updated successfully")
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Failed to update transaction: ${response.status} - ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     private suspend inline fun <reified T> handleFirestoreResponse(response: HttpResponse): Result<T> {
         return if (response.status.isSuccess()) {
             val json = Json { ignoreUnknownKeys = true }
@@ -625,3 +727,4 @@ class FirestoreService {
         }
     }
 }
+

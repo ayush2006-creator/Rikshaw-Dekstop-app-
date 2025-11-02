@@ -14,9 +14,14 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import org.example.project.firebase.FirestoreCustomer
+import org.example.project.firebase.FirestoreTransaction // Added import
+import org.example.project.firebase.DoubleValue // Added import
+import org.example.project.firebase.FirestoreUpiId // Added import
 import org.example.project.viewmodels.AuthViewModel
 import org.example.project.viewmodels.CustomerViewModel
+import org.example.project.viewmodels.CustomerUiState // Added import
 import java.text.SimpleDateFormat
+import java.time.Instant
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -37,10 +42,13 @@ fun CustomerDetailScreen(
         customerViewModel.loadTransactions()
     }
 
-    // Update current customer when the state changes
+    // Update current customer when the viewmodel state for selectedCustomer changes
+    // This ensures our local `currentCustomer` updates after a successful API edit
     LaunchedEffect(customerState.selectedCustomer) {
         customerState.selectedCustomer?.let {
-            currentCustomer = it
+            if (it.name == currentCustomer.name) { // Only update if it's the same customer
+                currentCustomer = it
+            }
         }
     }
 
@@ -74,22 +82,23 @@ fun CustomerDetailScreen(
                             .fillMaxWidth()
                             .padding(16.dp)
                     ) {
-                        Row {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
                             Text(
                                 text = "Customer Details",
                                 style = MaterialTheme.typography.titleLarge,
                                 fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(bottom = 16.dp).weight(5f)
+                                modifier = Modifier.weight(1f)
                             )
-                            Spacer(modifier = Modifier.weight(6f))
                             IconButton(
-                                onClick = { showEditDialog = true },
-                                modifier = Modifier.padding(bottom = 18.dp, start = 30.dp)
-                                    .weight(1f).scale(1.5f)
+                                onClick = { showEditDialog = true }
                             ) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit")
+                                Icon(Icons.Default.Edit, contentDescription = "Edit Customer")
                             }
                         }
+                        Spacer(modifier = Modifier.height(16.dp))
 
                         CustomerDetailRow("Account No", currentCustomer.fields.Accno.stringValue)
                         CustomerDetailRow("Name", currentCustomer.fields.Name.stringValue)
@@ -114,12 +123,56 @@ fun CustomerDetailScreen(
                         )
 
                         val remainingAmount =
-                            currentCustomer.fields.Amount.doubleValue - currentCustomer.fields.amountPaid.doubleValue
+                            customerViewModel.getRemainingAmount(currentCustomer)
                         CustomerDetailRow(
                             "Remaining Amount",
-                            "₹$remainingAmount",
+                            "₹%.2f".format(remainingAmount),
                             isHighlight = remainingAmount > 0
                         )
+
+                        // --- UPI IDs Section ---
+                        Divider(modifier = Modifier.padding(vertical = 12.dp))
+                        Text(
+                            text = "UPI IDs",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        customerState.customerUpiIds?.let { upiIds ->
+                            if (upiIds.isEmpty()) {
+                                Text(
+                                    "No UPI IDs added.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            } else {
+                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    upiIds.forEach { upiIdDoc ->
+                                        Text(
+                                            upiIdDoc.fields.upiId.stringValue,
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                    }
+                                }
+                            }
+                        } ?: run {
+                            // Show shimmer or placeholder while loading
+                            Text(
+                                "Loading UPI IDs...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { customerViewModel.openAddUpiIdDialog() },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Add New UPI ID")
+                        }
+                        // --- End of UPI IDs Section ---
                     }
                 }
             }
@@ -133,7 +186,7 @@ fun CustomerDetailScreen(
                 )
             }
 
-            if (customerState.isLoading) {
+            if (customerState.isLoading && customerState.transactions == null) {
                 item {
                     Box(
                         modifier = Modifier
@@ -159,8 +212,15 @@ fun CustomerDetailScreen(
                             },
                             supportingContent = {
                                 Text("Date: ${formatTimestamp(transaction.fields.date.timestampValue)}")
-                                Text("Balance: ${(transaction.fields.Balance.doubleValue)}")
-                                Text("fine: ${(transaction.fields.Fine.doubleValue)}")
+                                Text("Balance: ₹%.2f".format(transaction.fields.Balance.doubleValue))
+                                Text("Fine: ₹${transaction.fields.Fine.doubleValue}")
+                            },
+                            trailingContent = {
+                                IconButton(onClick = {
+                                    customerViewModel.openEditTransactionDialog(transaction)
+                                }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "Edit Fine")
+                                }
                             }
                         )
                     }
@@ -189,27 +249,44 @@ fun CustomerDetailScreen(
         }
     }
 
-    // Edit Dialog
+    // --- Dialogs ---
+
+    // Edit Customer Dialog
     if (showEditDialog) {
         EditCustomerDialog(
             customer = currentCustomer,
             onDismiss = { showEditDialog = false },
-            onSave = { updatedCustomer ->
+            onSave = { updatedCustomerFields ->
                 val customerId = currentCustomer.name.substringAfterLast('/')
 
-                // Optimistically update the local state immediately
-                currentCustomer = currentCustomer.copy(
-                    fields = updatedCustomer
-                )
-
-                // Then call the API
+                // Call the API to update
                 customerViewModel.updateCustomer(
                     customerId = customerId,
-                    updatedFields = updatedCustomer,
+                    updatedFields = updatedCustomerFields,
                     fieldsToUpdate = listOf("Name", "PhoneNo", "VehicleNo", "Amount", "installmentAmount")
                 )
                 showEditDialog = false
             }
+        )
+    }
+
+    // Add UPI ID Dialog
+    if (customerState.isAddUpiIdDialogOpen) {
+        AddUpiIdDialog(
+            uiState = customerState,
+            onDismiss = { customerViewModel.closeAddUpiIdDialog() },
+            onSave = { customerViewModel.addUpiIdForCustomer() },
+            onUpiIdChange = { customerViewModel.onNewUpiIdChange(it) }
+        )
+    }
+
+    // Edit Transaction Dialog
+    if (customerState.isEditTransactionDialogOpen) {
+        EditTransactionDialog(
+            uiState = customerState,
+            onDismiss = { customerViewModel.closeEditTransactionDialog() },
+            onSave = { customerViewModel.updateTransactionFine() },
+            onFineChange = { customerViewModel.onEditTransactionFineChange(it) }
         )
     }
 }
@@ -341,6 +418,124 @@ fun EditCustomerDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AddUpiIdDialog(
+    uiState: CustomerUiState,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onUpiIdChange: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add New UPI ID") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (uiState.isAddingUpiId) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                } else {
+                    OutlinedTextField(
+                        value = uiState.newUpiId,
+                        onValueChange = onUpiIdChange,
+                        label = { Text("UPI ID (e.g., user@okhdfcbank)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        isError = uiState.addUpiIdError != null
+                    )
+                    if (uiState.addUpiIdError != null) {
+                        Text(
+                            text = uiState.addUpiIdError,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onSave,
+                enabled = !uiState.isAddingUpiId
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !uiState.isAddingUpiId
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun EditTransactionDialog(
+    uiState: CustomerUiState,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onFineChange: (String) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit Transaction Fine") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (uiState.isUpdatingTransaction) {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                } else {
+                    Text(
+                        "Only the fine amount can be edited. To change the payment amount, please delete and recreate the transaction.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = uiState.editTransactionFine,
+                        onValueChange = onFineChange,
+                        label = { Text("Fine Amount") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        prefix = { Text("₹") },
+                        isError = uiState.editTransactionError != null
+                    )
+                    if (uiState.editTransactionError != null) {
+                        Text(
+                            text = uiState.editTransactionError,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onSave,
+                enabled = !uiState.isUpdatingTransaction
+            ) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !uiState.isUpdatingTransaction
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+
 @Composable
 fun CustomerDetailRow(
     label: String,
@@ -360,9 +555,9 @@ fun CustomerDetailRow(
             modifier = Modifier.weight(1f)
         )
         Text(
-            text = value,
+            text = value.ifBlank { "N/A" }, // Show N/A if value is blank
             style = MaterialTheme.typography.bodyMedium,
-            color = if (isHighlight && value.contains("₹") && !value.contains("₹0")) {
+            color = if (isHighlight && value.contains("₹") && !value.contains("₹0.00")) {
                 MaterialTheme.colorScheme.error
             } else {
                 MaterialTheme.colorScheme.onSurface
@@ -374,10 +569,13 @@ fun CustomerDetailRow(
 }
 
 fun formatTimestamp(timestamp: String): String {
+    if (timestamp.isBlank()) return "N/A"
     return try {
+        val instant = Instant.parse(timestamp)
+        val date = Date.from(instant)
         val sdf = SimpleDateFormat("dd/MM/yyyy", Locale.getDefault())
-        timestamp
+        sdf.format(date)
     } catch (e: Exception) {
-        timestamp
+        timestamp // Return original string if parsing fails
     }
 }

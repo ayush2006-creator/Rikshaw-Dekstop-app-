@@ -6,8 +6,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
-import org.example.project.firebase.*
-import java.lang.Math.floor
+import org.example.project.firebase.* // Assuming FirestoreTransaction is in here
+
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -29,7 +29,21 @@ data class CustomerUiState(
     val newCustomerClosingDate: String = "",
     val newCustomerUpiId: String = "",
     val isAddingCustomer: Boolean = false,
-    val addCustomerError: String? = null
+    val addCustomerError: String? = null,
+
+    // State for UPI ID
+    val customerUpiIds: List<FirestoreUpiId>? = null,
+    val isAddUpiIdDialogOpen: Boolean = false,
+    val newUpiId: String = "",
+    val addUpiIdError: String? = null,
+    val isAddingUpiId: Boolean = false,
+
+    // State for Editing Transaction
+    val selectedTransaction: FirestoreTransaction? = null,
+    val isEditTransactionDialogOpen: Boolean = false,
+    val editTransactionFine: String = "",
+    val editTransactionError: String? = null,
+    val isUpdatingTransaction: Boolean = false
 )
 
 
@@ -127,11 +141,18 @@ class CustomerViewModel(
     }
 
     fun selectCustomer(customer: FirestoreCustomer) {
-        uiState = uiState.copy(selectedCustomer = customer, transactions = null, errorMessage = null)
+        uiState = uiState.copy(
+            selectedCustomer = customer,
+            transactions = null,
+            errorMessage = null,
+            customerUpiIds = null // Clear old UPI IDs
+        )
+        // Load UPI IDs for the selected customer
+        loadUpiIds(customer.fields.Accno.stringValue)
     }
 
     fun clearSelectedCustomer() {
-        uiState = uiState.copy(selectedCustomer = null, transactions = null)
+        uiState = uiState.copy(selectedCustomer = null, transactions = null, customerUpiIds = null)
 
     }
 
@@ -185,7 +206,7 @@ class CustomerViewModel(
                     amountPaid = DoubleValue(0.0),
                 )
                 if (uiState.customers?.documents?.any { it.fields.Accno.stringValue == uiState.newCustomerAccNo } == true) {
-                    println("accno found LREADY")
+                    println("account found ")
                     uiState = uiState.copy(
                         isAddingCustomer = false,
                         addCustomerError = "Customer with this account number already exists"
@@ -255,8 +276,10 @@ class CustomerViewModel(
             result.fold(
                 onSuccess = {
                     println("Customer updated successfully!")
-                    loadCustomers() // Refresh the list
-                    uiState = uiState.copy(isLoading = false)
+                    // Optimistically update selectedCustomer as well
+                    val updatedSelectedCustomer = uiState.selectedCustomer?.copy(fields = updatedFields)
+                    uiState = uiState.copy(isLoading = false, selectedCustomer = updatedSelectedCustomer)
+                    loadCustomers() // Refresh the main list
                 },
                 onFailure = { error ->
                     val errorMessage = "Failed to update customer: ${error.message}"
@@ -286,16 +309,6 @@ class CustomerViewModel(
             )
         }
     }
-    fun addUpiID(upiId: String, accountNo: String){
-        viewModelScope.launch {
-            uiState = uiState.copy(isLoading = true, errorMessage = null)
-
-        }
-
-    }
-
-
-
 
     fun addDetailedTransaction(
         accountNo: String,
@@ -333,56 +346,6 @@ class CustomerViewModel(
                     errorMessage = e.message
                 )
             }
-        }
-    }
-    // Helper method to update customer's payment status after a transaction
-    private suspend fun updateCustomerPaymentStatus(accountNo: String, paidAmount: Double) {
-        try {
-            // Find the customer by account number
-            val customer = uiState.customers?.documents?.find {
-                it.fields.Accno.stringValue == accountNo
-            }
-
-            if (customer != null) {
-                val customerId = customer.name.substringAfterLast('/')
-                val currentAmountPaid = customer.fields.amountPaid.doubleValue
-                val newAmountPaid = currentAmountPaid + paidAmount
-
-                // Create updated fields with all required parameters, copying existing values
-                val existingFields = customer.fields
-                val updatedFields = CustomerFields(
-                    Accno = existingFields.Accno,
-                    Name = existingFields.Name,
-                    PhoneNo = existingFields.PhoneNo,
-                    VehicleNo = existingFields.VehicleNo,
-                    OpeningDate = existingFields.OpeningDate,
-                    ClosingDate = existingFields.ClosingDate,
-                    installmentAmount = existingFields.installmentAmount,
-                    Amount = existingFields.Amount,
-                    amountPaid = DoubleValue(newAmountPaid)
-                )
-
-                // Update only the amountPaid field
-                val updateResult = firestoreService.updateCustomer(
-                    currentUserId,
-                    customerId,
-                    updatedFields,
-                    listOf("amountPaid")
-                )
-
-                updateResult.fold(
-                    onSuccess = {
-                        println("Customer payment status updated successfully. New amount paid: $newAmountPaid")
-                    },
-                    onFailure = { error ->
-                        println("Failed to update customer payment status: ${error.message}")
-                    }
-                )
-            } else {
-                println("Customer with account number $accountNo not found")
-            }
-        } catch (e: Exception) {
-            println("Exception while updating customer payment status: ${e.message}")
         }
     }
 
@@ -428,7 +391,7 @@ class CustomerViewModel(
                     .toLocalDate()
 
                 // --- Calculation for how many installments have been fully paid ---
-                val paidInstallmentsCount = floor(amountPaid / installmentAmount).toLong()
+                val paidInstallmentsCount = kotlin.math.floor(amountPaid / installmentAmount).toLong()
 
                 // --- CORRECTED: Calculate the next due date directly ---
                 // If 5 installments are paid, the 6th day (index 5) is the next due date.
@@ -479,63 +442,117 @@ class CustomerViewModel(
     }
 
 
-    // Method to manually update customer's paid amount (for corrections)
-    fun updateCustomerPaidAmount(accountNo: String, newPaidAmount: Double) {
+    // --- UPI ID Management ---
+
+    private fun loadUpiIds(customerAccNo: String) {
         viewModelScope.launch {
-            uiState = uiState.copy(isLoading = true, errorMessage = null)
-
-            try {
-                val customer = uiState.customers?.documents?.find {
-                    it.fields.Accno.stringValue == accountNo
+            val result = firestoreService.getUpiIdsForCustomer(currentUserId, customerAccNo)
+            result.fold(
+                onSuccess = {
+                    uiState = uiState.copy(customerUpiIds = it)
+                },
+                onFailure = {
+                    uiState = uiState.copy(errorMessage = "Failed to load UPI IDs: ${it.message}")
                 }
+            )
+        }
+    }
 
-                if (customer != null) {
-                    val customerId = customer.name.substringAfterLast('/')
+    fun onNewUpiIdChange(upiId: String) {
+        uiState = uiState.copy(newUpiId = upiId, addUpiIdError = null)
+    }
 
-                    // Create updated fields with all required parameters, copying existing values
-                    val existingFields = customer.fields
-                    val updatedFields = CustomerFields(
-                        Accno = existingFields.Accno,
-                        Name = existingFields.Name,
-                        PhoneNo = existingFields.PhoneNo,
-                        VehicleNo = existingFields.VehicleNo,
-                        OpeningDate = existingFields.OpeningDate,
-                        ClosingDate = existingFields.ClosingDate,
-                        installmentAmount = existingFields.installmentAmount,
-                        Amount = existingFields.Amount,
-                        amountPaid = DoubleValue(newPaidAmount)
-                    )
+    fun openAddUpiIdDialog() {
+        uiState = uiState.copy(isAddUpiIdDialogOpen = true, newUpiId = "", addUpiIdError = null)
+    }
 
-                    val result = firestoreService.updateCustomer(
-                        currentUserId,
-                        customerId,
-                        updatedFields,
-                        listOf("amountPaid")
-                    )
+    fun closeAddUpiIdDialog() {
+        uiState = uiState.copy(isAddUpiIdDialogOpen = false, isAddingUpiId = false)
+    }
 
-                    result.fold(
-                        onSuccess = {
-                            println("Customer paid amount updated to: $newPaidAmount")
-                            loadCustomers() // Refresh the list
-                            uiState = uiState.copy(isLoading = false)
-                        },
-                        onFailure = { error ->
-                            val errorMessage = "Failed to update paid amount: ${error.message}"
-                            uiState = uiState.copy(isLoading = false, errorMessage = errorMessage)
-                        }
-                    )
-                } else {
+    fun addUpiIdForCustomer() {
+        val accNo = uiState.selectedCustomer?.fields?.Accno?.stringValue ?: return
+        val upiId = uiState.newUpiId
+
+        if (upiId.isBlank()) {
+            uiState = uiState.copy(addUpiIdError = "UPI ID cannot be empty")
+            return
+        }
+
+        viewModelScope.launch {
+            uiState = uiState.copy(isAddingUpiId = true, addUpiIdError = null)
+            val result = firestoreService.addUpiId(currentUserId, upiId, accNo)
+            result.fold(
+                onSuccess = {
+                    closeAddUpiIdDialog()
+                    loadUpiIds(accNo) // Refresh the list
+                },
+                onFailure = {
+                    uiState = uiState.copy(isAddingUpiId = false, addUpiIdError = it.message)
+                }
+            )
+        }
+    }
+
+    // --- Transaction Edit Management ---
+
+    fun onEditTransactionFineChange(fine: String) {
+        uiState = uiState.copy(editTransactionFine = fine, editTransactionError = null)
+    }
+
+    fun openEditTransactionDialog(transaction: FirestoreTransaction) {
+        uiState = uiState.copy(
+            isEditTransactionDialogOpen = true,
+            selectedTransaction = transaction,
+            editTransactionFine = transaction.fields.Fine.doubleValue.toString(),
+            editTransactionError = null
+        )
+    }
+
+    fun closeEditTransactionDialog() {
+        uiState = uiState.copy(
+            isEditTransactionDialogOpen = false,
+            selectedTransaction = null,
+            isUpdatingTransaction = false
+        )
+    }
+
+    fun updateTransactionFine() {
+        val transaction = uiState.selectedTransaction ?: return
+        val customerId = uiState.selectedCustomer?.name?.substringAfterLast('/') ?: return
+        val transactionId = transaction.name.substringAfterLast('/')
+        val newFine = uiState.editTransactionFine.toDoubleOrNull()
+
+        if (newFine == null || newFine < 0) {
+            uiState = uiState.copy(editTransactionError = "Please enter a valid fine amount")
+            return
+        }
+
+        viewModelScope.launch {
+            uiState = uiState.copy(isUpdatingTransaction = true, editTransactionError = null)
+
+            val updatedFields = transaction.fields.copy(Fine = DoubleValue(newFine))
+
+            val result = firestoreService.updateTransaction(
+                userId = currentUserId,
+                customerId = customerId,
+                transactionId = transactionId,
+                transactionFields = updatedFields,
+                updateMask = listOf("Fine")
+            )
+
+            result.fold(
+                onSuccess = {
+                    closeEditTransactionDialog()
+                    loadTransactions() // Refresh the list
+                },
+                onFailure = {
                     uiState = uiState.copy(
-                        isLoading = false,
-                        errorMessage = "Customer with account number $accountNo not found"
+                        isUpdatingTransaction = false,
+                        editTransactionError = it.message
                     )
                 }
-            } catch (e: Exception) {
-                uiState = uiState.copy(
-                    isLoading = false,
-                    errorMessage = "Error updating paid amount: ${e.message}"
-                )
-            }
+            )
         }
     }
 }

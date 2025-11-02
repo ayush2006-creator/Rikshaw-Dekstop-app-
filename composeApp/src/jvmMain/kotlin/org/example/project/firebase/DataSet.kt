@@ -36,7 +36,7 @@ data class CustomerFields(
 
 
 
-)
+    )
 
 @Serializable data class FirestoreCustomer(val name: String, val fields: CustomerFields)
 @Serializable data class CustomerListResponse(val documents: List<FirestoreCustomer>? = null)
@@ -66,4 +66,3 @@ data class DefaulterInfo(
     val fineAmount: Double,
     val lastPaymentDate: String?
 )
-
