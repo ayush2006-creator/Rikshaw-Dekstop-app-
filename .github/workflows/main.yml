@@ -26,6 +26,18 @@ jobs:
           gradlew.bat --no-daemon clean
           gradlew.bat --no-daemon packageReleaseExe
 
+      - name: Debug – List build folders
+        shell: cmd
+        run: |
+          echo "Listing build folders..."
+          dir build
+          echo "------------------------------------"
+          echo "Listing compose directory..."
+          dir build\compose
+          echo "------------------------------------"
+          echo "Listing binaries directory recursively..."
+          dir build\compose\binaries /s
+
       - name: Create config.properties
         run: |
           echo API_KEY=${{ secrets.API_KEY }} >> config.properties
@@ -37,5 +49,5 @@ jobs:
         with:
           name: windows-build
           path: |
-            **/compose/binaries/**/exe/
+            **/*.exe
             config.properties
