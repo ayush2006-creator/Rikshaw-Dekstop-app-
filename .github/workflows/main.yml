@@ -17,26 +17,17 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Make gradlew executable
-        run: git update-index --chmod=+x gradlew
-
       - name: Build EXE
         shell: cmd
         run: |
-          gradlew.bat --no-daemon clean
-          gradlew.bat --no-daemon packageReleaseExe
+          call gradlew.bat --no-daemon clean
+          call gradlew.bat --no-daemon packageExe --info
 
-      - name: Debug – List build folders
+      - name: Debug – Locate Output
         shell: cmd
         run: |
-          echo "Listing build folders..."
-          dir build
-          echo "------------------------------------"
-          echo "Listing compose directory..."
-          dir build\compose
-          echo "------------------------------------"
-          echo "Listing binaries directory recursively..."
-          dir build\compose\binaries /s
+          echo "Listing all EXE files generated..."
+          dir /s /b *.exe
 
       - name: Create config.properties
         run: |
