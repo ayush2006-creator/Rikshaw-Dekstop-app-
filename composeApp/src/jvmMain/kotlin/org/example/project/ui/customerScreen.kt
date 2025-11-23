@@ -4,41 +4,46 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import org.example.project.firebase.FirestoreCustomer
-import org.example.project.viewmodels.AuthViewModel
 import org.example.project.viewmodels.CustomerViewModel
+import org.example.project.viewmodels.UploadDialogState
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
+import java.io.FileInputStream
+import java.io.InputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CustomerScreen(
     customerViewModel: CustomerViewModel,
-    authViewModel: AuthViewModel,
     onSignOut: () -> Unit,
     onCustomerClick: (FirestoreCustomer) -> Unit,
     onNavigateToPending: () -> Unit
 ) {
     val customerState = customerViewModel.uiState
     var isAddTransactionDialogOpen by remember { mutableStateOf(false) }
-
-    // NEW: State for the search query
     var searchQuery by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         customerViewModel.loadCustomers()
     }
 
-    // NEW: Memoized filtered list. It recalculates only when searchQuery or customers list changes.
     val filteredCustomers = remember(searchQuery, customerState.customers?.documents) {
         val allCustomers = customerState.customers?.documents ?: emptyList()
         if (searchQuery.isBlank()) {
@@ -74,6 +79,12 @@ fun CustomerScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 FloatingActionButton(
+                    onClick = { customerViewModel.openUploadDialog() },
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = "Upload Statement")
+                }
+                FloatingActionButton(
                     onClick = { isAddTransactionDialogOpen = true },
                     containerColor = MaterialTheme.colorScheme.secondary
                 ) {
@@ -87,6 +98,7 @@ fun CustomerScreen(
             }
         }
     ) { padding ->
+        // Add Customer Dialog
         if (customerState.isAddCustomerDialogOpen) {
             AddCustomerDialog(
                 viewModel = customerViewModel,
@@ -95,6 +107,7 @@ fun CustomerScreen(
             )
         }
 
+        // Add Transaction Dialog
         if (isAddTransactionDialogOpen) {
             AddTransactionDialog(
                 customers = customerState.customers?.documents ?: emptyList(),
@@ -106,13 +119,33 @@ fun CustomerScreen(
             )
         }
 
-        // MODIFIED: Changed Box to Column to hold the search bar and the list
+        // Statement Upload Dialog
+        if (customerState.isUploadDialogOpen) {
+            StatementUploadDialog(
+                uiState = customerState,
+                onDismiss = { customerViewModel.closeUploadDialog() },
+                onProcess = { inputStream ->
+                    customerViewModel.processBankStatement(inputStream)
+                }
+            )
+        }
+
+        // Delete Customer Dialog
+        if (customerState.isDeleteCustomerDialogOpen && customerState.customerToDelete != null) {
+            DeleteCustomerDialog(
+                customer = customerState.customerToDelete!!,
+                onDismiss = customerViewModel::closeDeleteCustomerDialog,
+                onConfirm = customerViewModel::confirmDeleteCustomer,
+                isDeleting = customerState.isDeletingCustomer
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // NEW: Search Bar UI
+            // Search Bar
             OutlinedTextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
@@ -133,7 +166,6 @@ fun CustomerScreen(
                 singleLine = true
             )
 
-            // MODIFIED: Box now wraps only the content area to keep status messages centered
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
@@ -141,44 +173,23 @@ fun CustomerScreen(
                 if (customerState.isLoading) {
                     CircularProgressIndicator()
                 } else if (customerState.errorMessage != null) {
-                    Text("Error loading customers: ${customerState.errorMessage}")
+                    Text("Error: ${customerState.errorMessage}")
                 } else if (customerState.customers?.documents.isNullOrEmpty()) {
                     Text("No customers found. Add one!")
-                } else if (filteredCustomers.isEmpty()) { // NEW: Handle case where search yields no results
+                } else if (filteredCustomers.isEmpty()) {
                     Text("No matching customers found.")
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        // MODIFIED: Adjusted padding to account for the search bar
                         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // MODIFIED: Use the filtered list
                         items(filteredCustomers) { customerDoc ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onCustomerClick(customerDoc) }
-                            ) {
-                                ListItem(
-                                    headlineContent = {
-                                        Text(customerDoc.fields.Name.stringValue)
-                                    },
-                                    supportingContent = {
-                                        Text("Acc: ${customerDoc.fields.Accno.stringValue} | Vehicle: ${customerDoc.fields.VehicleNo.stringValue}")
-                                    },
-                                    trailingContent = {
-                                        Column(horizontalAlignment = Alignment.End) {
-                                            Text("₹${customerDoc.fields.Amount.doubleValue}")
-                                            Text(
-                                                "Paid: ₹${customerDoc.fields.amountPaid.doubleValue}",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                )
-                            }
+                            CustomerListItem(
+                                customer = customerDoc,
+                                onClick = { onCustomerClick(customerDoc) },
+                                onDelete = { customerViewModel.openDeleteCustomerDialog(customerDoc) }
+                            )
                         }
                     }
                 }
@@ -187,21 +198,83 @@ fun CustomerScreen(
     }
 }
 
+@Composable
+fun CustomerListItem(
+    customer: FirestoreCustomer,
+    onClick: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        onClick = onClick
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Main content
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp, end = 8.dp)
+            ) {
+                Text(
+                    text = customer.fields.Name.stringValue,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Acc: ${customer.fields.Accno.stringValue} | Vehicle: ${customer.fields.VehicleNo.stringValue}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Amount info
+            Column(
+                horizontalAlignment = Alignment.End,
+                modifier = Modifier.padding(end = 8.dp)
+            ) {
+                Text(
+                    text = "₹${customer.fields.Amount.doubleValue}",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Text(
+                    text = "Paid: ₹${"%.2f".format(customer.fields.amountPaid.doubleValue)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Delete button
+            IconButton(
+                onClick = { onDelete() },
+                colors = IconButtonDefaults.iconButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete Customer"
+                )
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddTransactionDialog(
     customers: List<FirestoreCustomer>,
     onDismiss: () -> Unit,
-    onConfirm: (String, Double,Double) -> Unit
+    onConfirm: (String, Double, Double) -> Unit
 ) {
-
     var selectedAccountNo by remember { mutableStateOf("") }
     var amount by remember { mutableStateOf("") }
-    var expanded by remember { mutableStateOf(false) }
+    var fine by remember { mutableStateOf("0") }
     var isError by remember { mutableStateOf(false) }
-    var fine by remember { mutableStateOf("") }
-    fine = 0.toString()
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -225,8 +298,9 @@ fun AddTransactionDialog(
                     onAccountSelected = { accountNo ->
                         selectedAccountNo = accountNo
                     },
-                    isError = isError
+                    isError = isError && selectedAccountNo.isEmpty()
                 )
+
                 OutlinedTextField(
                     value = amount,
                     onValueChange = {
@@ -240,17 +314,19 @@ fun AddTransactionDialog(
                     prefix = { Text("₹") },
                     isError = isError && (amount.isEmpty() || amount.toDoubleOrNull() == null || amount.toDoubleOrNull()!! <= 0)
                 )
+
                 OutlinedTextField(
                     value = fine,
                     onValueChange = {
                         fine = it
                         isError = false
                     },
-                    label = { Text("Fine") },
-                    placeholder = { Text("Enter payment fine") },
+                    label = { Text("Fine (Optional)") },
+                    placeholder = { Text("Enter fine amount") },
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    prefix = { Text("₹") })
+                    prefix = { Text("₹") }
+                )
 
                 if (isError) {
                     Text(
@@ -259,6 +335,7 @@ fun AddTransactionDialog(
                             amount.isEmpty() -> "Please enter an amount"
                             amount.toDoubleOrNull() == null -> "Please enter a valid amount"
                             amount.toDoubleOrNull()!! <= 0 -> "Amount must be greater than 0"
+                            fine.toDoubleOrNull() == null -> "Please enter a valid fine (or 0)"
                             else -> ""
                         },
                         color = MaterialTheme.colorScheme.error,
@@ -279,9 +356,9 @@ fun AddTransactionDialog(
                     Button(
                         onClick = {
                             val amountValue = amount.toDoubleOrNull()
-                            val fineamount  = fine.toDouble()
-                            if (selectedAccountNo.isNotEmpty() && amountValue != null && amountValue > 0) {
-                                onConfirm(selectedAccountNo, amountValue, fineamount)
+                            val fineAmount = fine.toDoubleOrNull() ?: 0.0
+                            if (selectedAccountNo.isNotEmpty() && amountValue != null && amountValue > 0 && fineAmount != null) {
+                                onConfirm(selectedAccountNo, amountValue, fineAmount)
                             } else {
                                 isError = true
                             }
@@ -294,6 +371,7 @@ fun AddTransactionDialog(
         }
     }
 }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchableCustomerDropdown(
@@ -371,4 +449,246 @@ fun SearchableCustomerDropdown(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun StatementUploadDialog(
+    uiState: org.example.project.viewmodels.CustomerUiState,
+    onDismiss: () -> Unit,
+    onProcess: (InputStream) -> Unit
+) {
+    var isError by remember { mutableStateOf<String?>(null) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 700.dp)
+                .padding(16.dp),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp)
+            ) {
+                Text(
+                    text = "Upload Bank Statement",
+                    style = MaterialTheme.typography.headlineSmall
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                when (uiState.uploadDialogState) {
+                    UploadDialogState.Loading -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text("Processing... Do not close.")
+                            }
+                        }
+                    }
+
+                    UploadDialogState.Success, UploadDialogState.Error -> {
+                        Text(
+                            "Processing Results",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp)
+                        ) {
+                            SelectionContainer {
+                                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                    Text(
+                                        text = uiState.uploadSummary,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            fontFamily = FontFamily.Monospace
+                                        ),
+                                        color = if (uiState.uploadDialogState == UploadDialogState.Error && uiState.uploadSummary.contains("FATAL"))
+                                            MaterialTheme.colorScheme.error
+                                        else
+                                            MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = onDismiss) {
+                                Text("Close")
+                            }
+                        }
+                    }
+
+                    UploadDialogState.Idle -> {
+                        Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                            Text(
+                                "Select an Excel bank statement file (.xls or .xlsx) to process.",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Spacer(modifier = Modifier.height(24.dp))
+
+                            Button(
+                                onClick = {
+                                    try {
+                                        val fileDialog = FileDialog(null as Frame?, "Select Excel File", FileDialog.LOAD)
+                                        fileDialog.setFile("*.xlsx;*.xls")
+                                        fileDialog.isVisible = true
+
+                                        val selectedFile = fileDialog.file
+                                        val selectedDirectory = fileDialog.directory
+
+                                        if (selectedFile != null && selectedDirectory != null) {
+                                            val file = File(selectedDirectory, selectedFile)
+                                            if (file.exists() && file.canRead()) {
+                                                onProcess(FileInputStream(file))
+                                                isError = null
+                                            } else {
+                                                isError = "Cannot read the selected file."
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        isError = "Error selecting file: ${e.message}"
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(56.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FileUpload,
+                                    contentDescription = null,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Text("Select Excel File")
+                            }
+
+                            if (isError != null) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = isError!!,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.height(24.dp))
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(onClick = onDismiss) {
+                                Text("Cancel")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DeleteCustomerDialog(
+    customer: FirestoreCustomer,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+    isDeleting: Boolean = false
+) {
+    AlertDialog(
+        onDismissRequest = { if (!isDeleting) onDismiss() },
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(end = 8.dp)
+                )
+                Text("Delete Customer")
+            }
+        },
+        text = {
+            Column {
+                Text(
+                    text = "Are you sure you want to delete this customer?",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = customer.fields.Name.stringValue,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Acc: ${customer.fields.Accno.stringValue}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Vehicle: ${customer.fields.VehicleNo.stringValue}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "⚠️ This action cannot be undone. All transactions and UPI IDs associated with this customer will remain in the database.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = !isDeleting,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                if (isDeleting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onError
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(if (isDeleting) "Deleting..." else "Delete")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isDeleting
+            ) {
+                Text("Cancel")
+            }
+        }
+    )
 }

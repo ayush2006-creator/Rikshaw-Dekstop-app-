@@ -60,7 +60,6 @@ fun App(authViewModel: AuthViewModel, firestoreService: FirestoreService) {
                     is MainScreen.CustomerList -> {
                         _root_ide_package_.org.example.project.ui.CustomerScreen(
                             customerViewModel = customerViewModel,
-                            authViewModel = authViewModel,
                             onSignOut = authViewModel::signOut,
                             onCustomerClick = customerViewModel::selectCustomer,
                             // Pass the lambda to navigate to the pending screen

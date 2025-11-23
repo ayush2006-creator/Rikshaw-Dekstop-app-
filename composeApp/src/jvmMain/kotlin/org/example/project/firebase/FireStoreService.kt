@@ -57,11 +57,6 @@ data class AccessTokenResponse(
     val token_type: String
 )
 
-// --- REMOVED CONFLICTING DATA CLASSES ---
-// The definitions for FirestoreUpiId and UpiIdFields
-// have been moved to DataModels.kt
-// ---
-
 class FirestoreService {
     private val projectId = "rikshaw-925ef"
     private val baseUrl = "https://firestore.googleapis.com/v1/projects/$projectId/databases/(default)/documents"
@@ -167,16 +162,34 @@ class FirestoreService {
             val response = httpClient.get(url) {
                 header("Authorization", "Bearer $accessToken")
             }
-            println(response.toString())
+            // println(response.toString())
 
             handleFirestoreResponse<CustomerListResponse>(response)
         } catch (e: Exception) {
-            println(e.toString())
+            // println(e.toString())
             Result.failure(e)
         }
     }
 
 
+    // --- FIXED: Renamed Document to FirestoreDoc to avoid serialization conflict ---
+    @Serializable
+    data class FirestoreDoc(
+        val name: String,
+        val fields: Map<String, JsonElement>
+    )
+
+    @Serializable
+    data class Write(
+        val update: FirestoreDoc? = null,
+        val currentDocument: Precondition? = null,
+        val updateMask: FieldMask? = null // For updating specific fields
+    )
+
+    @Serializable
+    data class FieldMask(
+        val fieldPaths: List<String>
+    )
 
     @Serializable
     data class CommitRequest(
@@ -184,29 +197,9 @@ class FirestoreService {
     )
 
     @Serializable
-    data class Write(
-        val update: Document,
-        val currentDocument: Precondition
-    )
-
-    @Serializable
-    data class Document(
-        val name: String,
-        val fields: Map<String, JsonElement> // Changed from Map<String, Any>
-    )
-
-    // REMOVED the incorrect FieldValue data class
-    // @Serializable
-    // data class FieldValue(
-    //     val stringValue: String
-    // )
-
-    @Serializable
     data class Precondition(
         val exists: Boolean
     )
-
-
 
     suspend fun addUpiId(userId: String, upiId: String, customerAccNo: String): Result<Unit> {
         if (upiId.isBlank() || upiId.contains("/")) {
@@ -224,40 +217,28 @@ class FirestoreService {
             val uniqueUpiDocPath =
                 "projects/$projectId/databases/(default)/documents/users/$userId/uniqueUpiIds/$upiId"
 
-            // --- FIX: Updated fields to match DataModels.kt schema ---
             val userUpiWrite = Write(
-                update = Document(
+                update = FirestoreDoc(
                     name = userUpiDocPath,
-                    fields = mapOf(
-                        "upiId" to buildJsonObject { put("stringValue", upiId) },
-                        "customerId" to buildJsonObject { put("stringValue", customerAccNo) },
-                        "isActive" to buildJsonObject { put("booleanValue", true) },
-                        "createdAt" to buildJsonObject { put("timestampValue", Instant.now().toString()) }
-                    )
+                    fields = buildJsonObject {
+                        put("upiId", buildJsonObject { put("stringValue", upiId) })
+                        put("customerId", buildJsonObject { put("stringValue", customerAccNo) }) // Changed from accNo
+                        put("isActive", buildJsonObject { put("booleanValue", true) })
+                        put("createdAt", buildJsonObject { put("timestampValue", Instant.now().toString()) })
+                    }
                 ),
                 currentDocument = Precondition(exists = false)
             )
 
             val uniqueUpiWrite = Write(
-                update = Document(
+                update = FirestoreDoc(
                     name = uniqueUpiDocPath,
-                    fields = mapOf(
-                        "customerId" to buildJsonObject { put("stringValue", customerAccNo) }
-                    )
+                    fields = buildJsonObject {
+                        put("customerId", buildJsonObject { put("stringValue", customerAccNo) })
+                    }
                 ),
                 currentDocument = Precondition(exists = false)
             )
-
-            // --- REMOVED CONFLICTING DECLARATION ---
-            // val uniqueUpiWrite = Write(
-            //     update = Document(
-            //         name = uniqueUpiDocPath,
-            //         fields = mapOf(
-            //             "customerId" to FieldValue(stringValue = customerAccNo)
-            //         )
-            //     ),
-            //     currentDocument = Precondition(exists = false)
-            // )
 
             val requestBody = CommitRequest(writes = listOf(userUpiWrite, uniqueUpiWrite))
 
@@ -323,20 +304,25 @@ class FirestoreService {
             }
 
             // --- Step 4: Call addUpiId with the customerId (which is the Accno) ---
-            println("Attempting to add UPI ID for customerId: $customerId")
-            val upiResult = addUpiId(
-                userId = userId,
-                upiId = upiId,
-                customerAccNo = customerFields.Accno.stringValue // This will be the same as customerId
-            )
+            if (upiId.isNotBlank()) {
+                println("Attempting to add UPI ID for customerId: $customerId")
+                val upiResult = addUpiId(
+                    userId = userId,
+                    upiId = upiId,
+                    customerAccNo = customerFields.Accno.stringValue // This will be the same as customerId
+                )
 
-            // --- Step 5: Return the result ---
-            if (upiResult.isSuccess) {
-                println("Successfully added customer and UPI ID.")
+                // --- Step 5: Return the result ---
+                if (upiResult.isSuccess) {
+                    println("Successfully added customer and UPI ID.")
+                } else {
+                    println("ERROR: Failed to add UPI ID. Reason: ${upiResult.exceptionOrNull()?.message}")
+                }
+                return upiResult
             } else {
-                println("ERROR: Failed to add UPI ID. Reason: ${upiResult.exceptionOrNull()?.message}")
+                println("No UPI ID provided, skipping UPI add.")
+                return Result.success(Unit)
             }
-            return upiResult
 
         } catch (e: Exception) {
             println("FATAL ERROR in addCustomer function: ${e.message}")
@@ -393,13 +379,42 @@ class FirestoreService {
     suspend fun getTransactions(userId: String, customerId: String): Result<TransactionListResponse> {
         return try {
             val accessToken = getAccessToken()
+            // Fetch all transactions without orderBy (to avoid index requirement)
             val url = "$baseUrl/users/$userId/customer/$customerId/transactions"
             val response = httpClient.get(url) {
                 header("Authorization", "Bearer $accessToken")
             }
 
-            handleFirestoreResponse<TransactionListResponse>(response)
+            if (response.status.isSuccess()) {
+                val json = Json {
+                    ignoreUnknownKeys = true
+                    coerceInputValues = true
+                }
+
+                val responseBody = response.bodyAsText()
+                println("📄 Transactions Response: $responseBody")
+
+                // Parse the response
+                val result = json.decodeFromString<TransactionListResponse>(responseBody)
+
+                // Sort transactions by date in memory (descending - newest first)
+                val sortedDocuments = result.documents?.sortedByDescending { transaction ->
+                    try {
+                        transaction.fields.date.timestampValue
+                    } catch (e: Exception) {
+                        "" // If date parsing fails, put it at the end
+                    }
+                }
+
+                Result.success(TransactionListResponse(documents = sortedDocuments))
+            } else {
+                val errorBody = response.bodyAsText()
+                println("❌ Error fetching transactions: ${response.status} - $errorBody")
+                Result.failure(Exception("Firestore error: ${response.status} - $errorBody"))
+            }
         } catch (e: Exception) {
+            println("❌ Exception in getTransactions: ${e.message}")
+            e.printStackTrace()
             Result.failure(e)
         }
     }
@@ -440,10 +455,10 @@ class FirestoreService {
                 contentType(ContentType.Application.Json)
                 setBody(mapOf("fields" to customerFields))
             }
-            println(response)
+            // println(response)
 
             if (response.status.isSuccess()) {
-                println("customer updated successfully")
+                // println("customer updated successfully")
                 Result.success(Unit)
 
             } else {
@@ -473,245 +488,142 @@ class FirestoreService {
             Result.failure(e)
         }
     }
-    // Add this method to your FirestoreService class
 
+    // --- UPI ID and Transaction Management ---
 
+    @Serializable
+    data class StructuredQuery(
+        val from: List<CollectionSelector>,
+        val where: Filter,
+        val limit: Int = 1
+    )
 
-    // Enhanced method with more transaction details and fine calculation
-    suspend fun addTransactionByAccountNumber(userId: String, accountNo: String, amount: Double, fine: Double): Result<Unit> {
-        return try {
-            // 1. Find the customer by their account number.
-            val customersResult = getCustomers(userId)
-            if (customersResult.isFailure) {
-                return Result.failure(customersResult.exceptionOrNull() ?: Exception("Failed to fetch customers."))
-            }
+    @Serializable
+    data class CollectionSelector(
+        val collectionId: String
+    )
 
-            val customer = customersResult.getOrNull()?.documents?.find {
-                it.fields.Accno.stringValue == accountNo
-            } ?: return Result.failure(Exception("Customer with account number $accountNo not found."))
+    @Serializable
+    data class Filter(
+        val compositeFilter: CompositeFilter
+    )
 
-            // 2. Prepare the new transaction details.
-            val customerId = customer.name.substringAfterLast("/")
-            val currentBalance = customer.fields.Amount.doubleValue - customer.fields.amountPaid.doubleValue
-            val newBalance = currentBalance - amount
+    @Serializable
+    data class CompositeFilter(
+        val op: String, // "AND"
+        val filters: List<FieldFilterWrapper>
+    )
 
-            val transactionFields = TransactionFields(
-                amount = DoubleValue(amount),
-                Balance = DoubleValue(newBalance),
-                date = TimestampValue(Instant.now().toString()),
-                Fine = DoubleValue(fine)
-            )
+    @Serializable
+    data class FieldFilterWrapper(
+        val fieldFilter: FieldFilter
+    )
 
-            // 3. Add the transaction document to Firestore.
-            val addTransactionResult = addTransaction(userId, customerId, transactionFields)
+    @Serializable
+    data class FieldFilter(
+        val field: Path,
+        val op: String, // "EQUAL"
+        val value: Value
+    )
 
-            // 4. Check the result and proceed to update the customer.
-            if (addTransactionResult.isSuccess) {
-                println("Transaction added successfully with amount: $amount and fine: $fine")
-                // THIS IS THE CRITICAL FIX:
-                // We now return the result of the customer update operation.
-                return updateCustomerAmountPaid(userId, customerId, customer, amount)
-            } else {
-                // If adding the transaction failed, return that specific failure result.
-                println("Failed to add transaction, customer will not be updated.")
-                return addTransactionResult
-            }
+    @Serializable
+    data class Path(
+        val fieldPath: String
+    )
 
-        } catch (e: Exception) {
-            // Catch any other exceptions during the process.
-            Result.failure(e)
-        }
-    }
+    @Serializable
+    data class Value(
+        val stringValue: String? = null,
+        val booleanValue: Boolean? = null
+    )
 
-    private suspend fun updateCustomerAmountPaid(
-        userId: String,
-        customerId: String,
-        customer: FirestoreCustomer,
-        paymentAmount: Double
-    ): Result<Unit> {
-        return try {
-            val currentAmountPaid = customer.fields.amountPaid.doubleValue
-            val newAmountPaid = currentAmountPaid + paymentAmount
-
-            val updatedFields = customer.fields.copy(
-                amountPaid = DoubleValue(newAmountPaid)
-            )
-
-            updateCustomer(userId, customerId, updatedFields, listOf("amountPaid"))
-        } catch (e: Exception) {
-            Result.failure<Unit>(e)
-        }
-    }
-
-    // Enhanced method with more transaction details and fine calculation
-    suspend fun addDetailedTransactionByAccountNumber(
-        userId: String,
-        accountNo: String,
-        amount: Double,
-        fine: Double = 0.0
-    ): Result<Unit> {
-        return try {
-            val accessToken = getAccessToken()
-
-            // First, find the customer by account number
-            val customersResult = getCustomers(userId)
-            if (customersResult.isFailure) {
-                return Result.failure(Exception("Failed to fetch customers: ${customersResult.exceptionOrNull()?.message}"))
-            }
-
-            val customers = customersResult.getOrNull()
-            val customer = customers?.documents?.find {
-                it.fields.Accno.stringValue == accountNo
-            }
-
-            if (customer == null) {
-                return Result.failure(Exception("Customer with account number $accountNo not found"))
-            }
-            else{}
-
-            // Extract customer ID from the document name
-            val customerId = customer.name.substringAfterLast("/")
-
-            // Calculate new balance after payment
-            val currentBalance = customer.fields.Amount.doubleValue - customer.fields.amountPaid.doubleValue
-            val newBalance = currentBalance - amount
-
-            // Create transaction fields using your structure
-            val transactionFields = TransactionFields(
-                amount = DoubleValue(amount),
-                Balance = DoubleValue(newBalance),
-                date = TimestampValue(Instant.now().toString()),
-                Fine = DoubleValue(fine)
-            )
-
-            // Make API call using the existing addTransaction method
-            val addResult = addTransaction(userId, customerId, transactionFields)
-
-        } catch (e: Exception) {
-            Result.failure<Unit>(e)
-        } as Result<Unit>
-    }
-
-    // Method to get all transactions for a customer by account number
-    suspend fun getTransactionsByAccountNumber(userId: String, accountNo: String): Result<TransactionListResponse> {
-        return try {
-            // First, find the customer by account number
-            val customersResult = getCustomers(userId)
-            if (customersResult.isFailure) {
-                return Result.failure(Exception("Failed to fetch customers: ${customersResult.exceptionOrNull()?.message}"))
-            }
-
-            val customers = customersResult.getOrNull()
-            val customer = customers?.documents?.find {
-                it.fields.Accno.stringValue == accountNo
-            }
-
-            if (customer == null) {
-                return Result.failure(Exception("Customer with account number $accountNo not found"))
-            }
-
-            // Extract customer ID from the document name
-            val customerId = customer.name.substringAfterLast("/")
-
-            // Get transactions for this customer
-            getTransactions(userId, customerId)
-
-        } catch (e: Exception) {
-            Result.failure<TransactionListResponse>(e)
-        }
-    }
-
-    // Utility method to validate account number exists
-    suspend fun validateAccountNumber(userId: String, accountNo: String): Result<FirestoreCustomer> {
-        return try {
-            val customersResult = getCustomers(userId)
-            if (customersResult.isFailure) {
-                return Result.failure(Exception("Failed to fetch customers: ${customersResult.exceptionOrNull()?.message}"))
-            }
-
-            val customers = customersResult.getOrNull()
-            val customer = customers?.documents?.find {
-                it.fields.Accno.stringValue == accountNo
-            }
-
-            if (customer != null) {
-                Result.success(customer)
-            } else {
-                Result.failure(Exception("Customer with account number $accountNo not found"))
-            }
-
-        } catch (e: Exception) {
-            Result.failure<FirestoreCustomer>(e)
-        }
-    }
-
-    // --- New method to get UPI IDs ---
+    // Get UPI IDs for a specific customer
     suspend fun getUpiIdsForCustomer(userId: String, customerAccNo: String): Result<List<FirestoreUpiId>> {
         return try {
             val accessToken = getAccessToken()
-           val url = "$baseUrl/users/$userId:runQuery"
-            // We need to construct a JSON body for the query
-            // Updated to query 'customerId' and 'isActive' based on new DataModels.kt
-            val queryBody = """
-                {
-                  "structuredQuery": {
-                    "from": [{"collectionId": "upiIds"}],
-                    "where": {
-                      "compositeFilter": {
-                        "op": "AND",
-                        "filters": [
-                          {
-                            "fieldFilter": {
-                              "field": {"fieldPath": "customerId"},
-                              "op": "EQUAL",
-                              "value": {"stringValue": "$customerAccNo"}
-                            }
-                          },
-                          {
-                            "fieldFilter": {
-                              "field": {"fieldPath": "isActive"},
-                              "op": "EQUAL",
-                              "value": {"booleanValue": true}
-                            }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }
-            """.trimIndent()
+            // This is the URL for running a query
+            val url = "$baseUrl/users/$userId:runQuery"
+
+            // Construct the structured query
+            val query = mapOf(
+                "structuredQuery" to StructuredQuery(
+                    from = listOf(CollectionSelector(collectionId = "upiIds")),
+                    where = Filter(
+                        compositeFilter = CompositeFilter(
+                            op = "AND",
+                            filters = listOf(
+                                FieldFilterWrapper(FieldFilter(
+                                    field = Path("customerId"),
+                                    op = "EQUAL",
+                                    value = Value(stringValue = customerAccNo)
+                                )),
+                                FieldFilterWrapper(FieldFilter(
+                                    field = Path("isActive"),
+                                    op = "EQUAL",
+                                    value = Value(booleanValue = true)
+                                ))
+                            )
+                        )
+                    ),
+                    limit = 20 // Get up to 20 UPI IDs for this customer
+                )
+            )
 
             val response = httpClient.post(url) {
                 header("Authorization", "Bearer $accessToken")
                 contentType(ContentType.Application.Json)
-                setBody(queryBody)
+                setBody(query)
             }
 
             if (response.status.isSuccess()) {
                 val json = Json { ignoreUnknownKeys = true }
-                // runQuery returns a JSON array of documents, potentially empty
-                val responseBody = response.bodyAsText()
-                if (responseBody == "[]") {
-                    return Result.success(emptyList()) // No matching documents
-                }
-
-                // Each item in the array has a "document" field
-                val queryResponse = json.decodeFromString<List<QueryResponseDocument>>(responseBody)
-                val documents = queryResponse.map { it.document }
-                Result.success(documents)
+                // The response is an array of objects, each containing a 'document'
+                val queryResults = json.decodeFromString<List<QueryResponseDocument>>(response.bodyAsText())
+                val upiIds = queryResults.map { it.document }
+                Result.success(upiIds)
             } else {
-                Result.failure(Exception("Firestore error: ${response.status} - ${response.bodyAsText()}"))
+                Result.failure(Exception("Failed to get UPI IDs: ${response.status} - ${response.bodyAsText()}"))
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    // --- NEW METHOD: Delete a transaction ---
+    // Update a specific transaction (e.g., to add a fine)
+    suspend fun updateTransaction(
+        userId: String,
+        customerId: String,
+        transactionId: String,
+        updatedFields: TransactionFields,
+        updateMask: List<String>
+    ): Result<Unit> {
+        return try {
+            val accessToken = getAccessToken()
+            val maskParams = updateMask.joinToString("&") { field ->
+                "updateMask.fieldPaths=$field"
+            }
+            val url = "$baseUrl/users/$userId/customer/$customerId/transactions/$transactionId?$maskParams"
+
+            val response = httpClient.patch(url) {
+                header("Authorization", "Bearer $accessToken")
+                contentType(ContentType.Application.Json)
+                setBody(mapOf("fields" to updatedFields))
+            }
+
+            if (response.status.isSuccess()) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Failed to update transaction: ${response.status} - ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // Delete a specific transaction
     suspend fun deleteTransaction(userId: String, customerId: String, transactionId: String): Result<Unit> {
         return try {
             val accessToken = getAccessToken()
-            // Construct the full path to the specific transaction document
             val url = "$baseUrl/users/$userId/customer/$customerId/transactions/$transactionId"
 
             val response = httpClient.delete(url) {
@@ -719,7 +631,6 @@ class FirestoreService {
             }
 
             if (response.status.isSuccess()) {
-                println("Transaction deleted successfully: $transactionId")
                 Result.success(Unit)
             } else {
                 Result.failure(Exception("Failed to delete transaction: ${response.status} - ${response.bodyAsText()}"))
@@ -729,33 +640,195 @@ class FirestoreService {
         }
     }
 
-    // Add this method to your FirestoreService class
 
+    // --- Bank Statement Processing ---
 
-
-    // Enhanced method with more transaction details and fine calculation
-    // --- New method to update a transaction ---
-    suspend fun updateTransaction(userId: String, customerId: String, transactionId: String, transactionFields: TransactionFields, updateMask: List<String>): Result<Unit> {
+    // 1. Check if a bank transaction reference has already been processed
+    suspend fun isBankRefProcessed(userId: String, bankTransactionRef: String): Result<Boolean> {
         return try {
             val accessToken = getAccessToken()
-            val maskParams = updateMask.joinToString("&") { field ->
-                "updateMask.fieldPaths=$field"
+            // Document ID is the ref itself for a quick lookup
+            val url = "$baseUrl/users/$userId/processedBankTransactions/$bankTransactionRef"
+
+            val response = httpClient.get(url) {
+                header("Authorization", "Bearer $accessToken")
             }
-            // Construct the full path to the specific transaction document
-            val url = "$baseUrl/users/$userId/customer/$customerId/transactions/$transactionId?$maskParams"
 
+            when (response.status) {
+                HttpStatusCode.OK -> Result.success(true) // Document exists, it's a duplicate
+                HttpStatusCode.NotFound -> Result.success(false) // Document doesn't exist, not a duplicate
+                else -> Result.failure(Exception("Error checking bank ref: ${response.status} - ${response.bodyAsText()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
-            val response = httpClient.patch(url) {
+    // 2. Find a customer's account number by their UPI ID
+    // Replace your existing findCustomerByUpiId function with this:
+
+    suspend fun findCustomerByUpiId(userId: String, upiId: String): Result<String?> {
+        return try {
+            val accessToken = getAccessToken()
+            val url = "$baseUrl/users/$userId/uniqueUpiIds/$upiId"
+
+            println("🔍 Firebase GET request to: $url")
+
+            val response = httpClient.get(url) {
+                header("Authorization", "Bearer $accessToken")
+            }
+
+            println("📡 Response status: ${response.status}")
+
+            if (response.status == HttpStatusCode.OK) {
+                val responseBody = response.bodyAsText()
+                println("📄 Response body: $responseBody")
+
+                val json = Json { ignoreUnknownKeys = true }
+
+                // Define the structure to match Firestore's response
+                @Serializable
+                data class FirestoreStringValue(val stringValue: String)
+
+                @Serializable
+                data class UpiLookupFields(val customerId: FirestoreStringValue)
+
+                @Serializable
+                data class UpiLookupDoc(val name: String, val fields: UpiLookupFields)
+
+                val upiDoc = json.decodeFromString<UpiLookupDoc>(responseBody)
+                val customerIdValue = upiDoc.fields.customerId.stringValue
+
+                println("✅ Successfully extracted customerId: '$customerIdValue'")
+                Result.success(customerIdValue)
+
+            } else if (response.status == HttpStatusCode.NotFound) {
+                println("⚠️ Document not found in Firebase for UPI: $upiId")
+                Result.success(null)
+            } else {
+                val errorBody = response.bodyAsText()
+                println("❌ Error response: $errorBody")
+                Result.failure(Exception("Error finding UPI ID: ${response.status} - $errorBody"))
+            }
+        } catch (e: Exception) {
+            println("❌ Exception in findCustomerByUpiId for '$upiId': ${e.message}")
+            e.printStackTrace()
+            Result.failure(e)
+        }
+    }
+
+    // 3. Add transaction and log bank ref in a single atomic batch
+    suspend fun addTransactionByAccountNumber(
+        userId: String,
+        accountNo: String,
+        amount: Double,
+        fine: Double,
+        bankTransactionRef: String // New param
+    ): Result<Unit> {
+        return try {
+            // 1. Find the customer by their account number to get current data
+            val customersResult = getCustomers(userId)
+            if (customersResult.isFailure) {
+                return Result.failure(customersResult.exceptionOrNull() ?: Exception("Failed to fetch customers."))
+            }
+
+            val customer = customersResult.getOrNull()?.documents?.find {
+                it.fields.Accno.stringValue == accountNo
+            } ?: return Result.failure(Exception("Customer with account number $accountNo not found."))
+
+            val customerId = customer.name.substringAfterLast("/") // This is the Document ID (which is the accNo)
+            val customerDocPath = "projects/$projectId/databases/(default)/documents/users/$userId/customer/$customerId"
+
+            // 2. Prepare transaction details
+            val newTransactionId = UUID.randomUUID().toString()
+            val transactionDocPath = "$customerDocPath/transactions/$newTransactionId"
+
+            val currentAmountPaid = customer.fields.amountPaid.doubleValue
+            val currentBalance = customer.fields.Amount.doubleValue - currentAmountPaid
+            val newBalance = currentBalance - amount
+            val newAmountPaid = currentAmountPaid + amount
+
+            // 3. Prepare the atomic commit
+            val accessToken = getAccessToken()
+            val commitUrl = "$baseUrl:commit"
+
+            val writes = mutableListOf<Write>()
+
+            // --- Write 1: Create the new transaction ---
+            val transactionFields = buildJsonObject {
+                put("amount", buildJsonObject { put("doubleValue", amount) })
+                put("Balance", buildJsonObject { put("doubleValue", newBalance) })
+                put("date", buildJsonObject { put("timestampValue", Instant.now().toString()) })
+                put("Fine", buildJsonObject { put("doubleValue", fine) })
+                put("transactionType", buildJsonObject { put("stringValue", "payment") })
+                put("description", buildJsonObject { put("stringValue", "") })
+                put("installmentsCovered", buildJsonObject { put("integerValue", 1) })
+                if (bankTransactionRef.isNotBlank()) {
+                    put("bankTransactionRef", buildJsonObject { put("stringValue", bankTransactionRef) })
+                }
+            }
+            writes.add(
+                Write(
+                    update = FirestoreDoc(
+                        name = transactionDocPath,
+                        fields = transactionFields
+                    )
+                )
+            )
+
+            // --- Write 2: Log the bank transaction ref (if provided) ---
+            if (bankTransactionRef.isNotBlank()) {
+                val bankRefDocPath = "projects/$projectId/databases/(default)/documents/users/$userId/processedBankTransactions/$bankTransactionRef"
+                writes.add(
+                    Write(
+                        update = FirestoreDoc(
+                            name = bankRefDocPath,
+                            fields = buildJsonObject {
+                                put("processedAt", buildJsonObject { put("timestampValue", Instant.now().toString()) })
+                                put("customerId", buildJsonObject { put("stringValue", customerId) })
+                                put("amount", buildJsonObject { put("doubleValue", amount) })
+                            }
+                        ),
+                        // This precondition ensures it's not a duplicate
+                        currentDocument = Precondition(exists = false)
+                    )
+                )
+            }
+
+            // --- Write 3: Update the customer's amountPaid ---
+            writes.add(
+                Write(
+                    update = FirestoreDoc(
+                        name = customerDocPath,
+                        fields = buildJsonObject {
+                            put("amountPaid", buildJsonObject { put("doubleValue", newAmountPaid) })
+                        }
+                    ),
+                    // FIXED: Added the required updateMask
+                    updateMask = FieldMask(fieldPaths = listOf("amountPaid")),
+                    // This precondition ensures the customer document exists
+                    currentDocument = Precondition(exists = true)
+                )
+            )
+
+            // 4. Send the batch write request
+            val requestBody = CommitRequest(writes = writes)
+            val response = httpClient.post(commitUrl) {
                 header("Authorization", "Bearer $accessToken")
                 contentType(ContentType.Application.Json)
-                setBody(mapOf("fields" to transactionFields))
+                setBody(requestBody)
             }
 
+            // 5. Handle response
             if (response.status.isSuccess()) {
-                println("Transaction updated successfully")
                 Result.success(Unit)
             } else {
-                Result.failure(Exception("Failed to update transaction: ${response.status} - ${response.bodyAsText()}"))
+                val errorBody = response.bodyAsText()
+                if (errorBody.contains("FAILED_PRECONDITION")) {
+                    Result.failure(Exception("Transaction failed: This is a duplicate bank transaction."))
+                } else {
+                    Result.failure(Exception("Transaction commit failed: ${response.status} - $errorBody"))
+                }
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -772,5 +845,4 @@ class FirestoreService {
         }
     }
 }
-
 

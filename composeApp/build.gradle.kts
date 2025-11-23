@@ -28,6 +28,16 @@ kotlin {
             implementation(libs.kotlin.test)
         }
         jvmMain.dependencies {
+
+            // Apache POI for Excel file reading
+            implementation("org.apache.poi:poi:5.2.5")
+            implementation("org.apache.poi:poi-ooxml:5.2.5")
+
+            // Required dependencies for Apache POI
+            implementation("org.apache.xmlbeans:xmlbeans:5.1.1")
+            implementation("org.apache.commons:commons-compress:1.24.0")
+            implementation("org.apache.commons:commons-collections4:4.4")
+
             implementation("technology.tabula:tabula:1.0.5")
             implementation("org.apache.pdfbox:pdfbox:2.0.29")
             implementation(compose.materialIconsExtended)

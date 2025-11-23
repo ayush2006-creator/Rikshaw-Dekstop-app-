@@ -1,7 +1,5 @@
 package org.example.project.firebase
 
-
-
 import kotlinx.serialization.Serializable
 
 @Serializable data class StringValue(val stringValue: String)
@@ -14,12 +12,24 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class UpiIdFields(
     val upiId: StringValue,
-    val customerId: StringValue,
+    val customerId: StringValue, // This is the Account No
     val isActive: BooleanValue,
     val createdAt: TimestampValue
 )
 @Serializable data class FirestoreUpiId(val name: String, val fields: UpiIdFields)
 @Serializable data class UpiIdListResponse(val documents: List<FirestoreUpiId>? = null)
+
+// This wrapper is used when parsing the result of a :runQuery request
+
+
+// This wrapper is used when parsing a direct GET for a UPI ID
+@Serializable
+data class UniqueUpiIdDocument(
+    val name: String,
+    val fields: Map<String, StringValue>, // Expecting {"customerId": {"stringValue": "..."}}
+    val createTime: String,
+    val updateTime: String
+)
 
 // Enhanced Customer document structure
 @Serializable
@@ -33,10 +43,7 @@ data class CustomerFields(
     val installmentAmount: DoubleValue,
     val Amount: DoubleValue,
     val amountPaid: DoubleValue,
-
-
-
-    )
+)
 
 @Serializable data class FirestoreCustomer(val name: String, val fields: CustomerFields)
 @Serializable data class CustomerListResponse(val documents: List<FirestoreCustomer>? = null)
@@ -50,7 +57,8 @@ data class TransactionFields(
     val Fine: DoubleValue,
     val transactionType: StringValue = StringValue("payment"),
     val description: StringValue = StringValue(""),
-    val installmentsCovered: IntegerValue = IntegerValue(1) // How many installments this payment covers
+    val installmentsCovered: IntegerValue = IntegerValue(1), // How many installments this payment covers
+    val bankTransactionRef: StringValue = StringValue("") // NEW: For bank statement deduplication
 )
 @Serializable data class FirestoreTransaction(val name: String, val fields: TransactionFields)
 @Serializable data class TransactionListResponse(val documents: List<FirestoreTransaction>? = null)
@@ -66,3 +74,6 @@ data class DefaulterInfo(
     val fineAmount: Double,
     val lastPaymentDate: String?
 )
+
+// Add this data class to parse the response from creating a document
+
