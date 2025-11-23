@@ -62,7 +62,12 @@ compose.desktop {
         mainClass = "org.example.project.MainKt"
 
         nativeDistributions {
-            targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
+            targetFormats(
+                TargetFormat.Exe,   // EXE for Windows
+                TargetFormat.Msi,   // optional
+                TargetFormat.Dmg,   // macOS
+                TargetFormat.Deb    // Linux
+            )
             packageName = "org.example.project"
             packageVersion = "1.0.0"
         }
